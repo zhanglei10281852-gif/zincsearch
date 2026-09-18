@@ -46,3 +46,12 @@ func init() {
 func Close() error {
 	return db.Close()
 }
+
+// SetDB replaces the metadata storage backend and returns the previous one.
+// It exists so tests can inject storage failures; production code must not
+// call it.
+func SetDB(storage storage.Storager) storage.Storager {
+	prev := db
+	db = storage
+	return prev
+}

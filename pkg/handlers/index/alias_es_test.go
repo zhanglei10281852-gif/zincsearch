@@ -16,13 +16,16 @@
 package index
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/zincsearch/zincsearch/pkg/core"
+	"github.com/zincsearch/zincsearch/pkg/meta"
 	"github.com/zincsearch/zincsearch/pkg/metadata"
+	"github.com/zincsearch/zincsearch/pkg/zutils/json"
 	"github.com/zincsearch/zincsearch/test/utils"
 )
 
@@ -271,6 +274,45 @@ func TestGetESAliases(t *testing.T) {
 			require.Equal(t, tt.args.result, w.Body.String())
 		})
 	}
+}
+
+// a persistence failure must surface as an error, leave the previously
+// visible alias state untouched, and allow the same request to be retried.
+func TestAddOrRemoveESAlias_PersistFailureRollbackAndRetry(t *testing.T) {
+	indexName := "TestAddOrRemoveESAlias.rollback"
+	index, closeFn := newIndex(t, indexName)
+	defer closeFn()
+	require.Equal(t, indexName, index.GetName())
+
+	body := `{"actions": [{"add": {"index": "` + indexName + `","alias": "rollback_alias_1"}}]}`
+
+	// metadata backend refuses writes
+	mem := utils.NewMemStorage()
+	prev := metadata.SetDB(mem)
+	mem.FailSet = func(string) error { return errors.New("metadata unavailable") }
+
+	c, w := utils.NewGinContext()
+	utils.SetGinRequestData(c, body)
+	AddOrRemoveESAlias(c)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	var errResp meta.HTTPResponseError
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error, "metadata unavailable")
+	require.Empty(t, core.ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(indexName))
+
+	// recover storage and retry the very same request
+	mem.FailSet = nil
+	metadata.SetDB(prev)
+
+	c2, w2 := utils.NewGinContext()
+	utils.SetGinRequestData(c2, body)
+	AddOrRemoveESAlias(c2)
+
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, `{"acknowledged":true}`, w2.Body.String())
+	require.ElementsMatch(t, []string{"rollback_alias_1"},
+		core.ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(indexName))
 }
 
 func newIndex(t *testing.T, indexName string) (*core.Index, func()) {

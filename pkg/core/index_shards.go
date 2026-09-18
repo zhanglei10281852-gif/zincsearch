@@ -48,6 +48,7 @@ const (
 // First layer shard just used for distribute not really store documents.
 type IndexShard struct {
 	open   uint64
+	closed uint32 // set to 1 by Close so writers can never be reopened
 	name   string // shard name: index/shardID
 	root   *Index
 	ref    *meta.IndexShard
@@ -56,6 +57,11 @@ type IndexShard struct {
 	lock   sync.RWMutex
 	close  chan struct{}
 }
+
+// errIndexShardClosed is returned when an operation tries to (re)open a
+// writer after the shard has been closed, e.g. a search or the WAL consumer
+// racing index deletion.
+var errIndexShardClosed = errors.New(errors.ErrorTypeRuntimeException, "index shard is closed")
 
 // IndexSecondShard second layer shard by auto increate shards for index.
 // Under first layer shards, Documents will store in this layer shards.
@@ -151,6 +157,13 @@ func (s *IndexShard) NewShard() error {
 
 // GetWriter return the newest shard writer or special shard writer
 func (s *IndexShard) GetWriter(shardID ...int64) (*riot.Writer, error) {
+	// a closed shard must never reopen writers; otherwise a search or the
+	// WAL consumer racing index deletion could re-lock bluge.pid after the
+	// shard was closed and leak a writer into a deleted data directory
+	if atomic.LoadUint32(&s.closed) == 1 {
+		return nil, errIndexShardClosed
+	}
+
 	var id int64
 	if len(shardID) == 1 {
 		id = shardID[0]
@@ -257,6 +270,11 @@ func (s *IndexShard) openWriter(shardID int64) error {
 	if secondShard.writer != nil {
 		return nil
 	}
+	// re-check under the writer lock: Close may have raced us and be
+	// closing the shard right now; never hand out a fresh writer afterwards
+	if atomic.LoadUint32(&s.closed) == 1 {
+		return errIndexShardClosed
+	}
 	var err error
 	indexName := fmt.Sprintf("%s/%s/%06x", s.GetIndexName(), s.GetID(), shardID)
 	secondShard.writer, err = OpenIndexWriter(indexName, s.root.GetStorageType(), defaultSearchAnalyzer, 0, 0)
@@ -265,8 +283,15 @@ func (s *IndexShard) openWriter(shardID int64) error {
 
 func (s *IndexShard) Close() error {
 	if atomic.LoadUint64(&s.open) == 0 {
+		// a shard that never finished opening must not allow writers to be
+		// (re)opened after deletion either
+		atomic.StoreUint32(&s.closed, 1)
 		return nil
 	}
+
+	// mark closed first, so a WAL consumer or search already past other
+	// checks cannot (re)open a writer while we are shutting this shard down
+	atomic.StoreUint32(&s.closed, 1)
 
 	s.close <- struct{}{}
 	atomic.StoreUint64(&s.open, 0)
@@ -274,13 +299,17 @@ func (s *IndexShard) Close() error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	for _, secondShard := range s.shards {
+		secondShard.lock.Lock()
 		if secondShard.writer == nil {
+			secondShard.lock.Unlock()
 			continue
 		}
 		if err := secondShard.writer.Close(); err != nil {
+			secondShard.lock.Unlock()
 			return err
 		}
 		secondShard.writer = nil
+		secondShard.lock.Unlock()
 	}
 
 	if err := s.wal.Close(); err != nil {

@@ -34,54 +34,260 @@ func NewAliasList() *AliasList {
 	return &AliasList{Aliases: map[string][]string{}}
 }
 
-func (al *AliasList) AddIndexesToAlias(alias string, indexes []string) error {
-	al.lock.Lock()
-	al.Aliases[alias] = append(al.Aliases[alias], indexes...)
+// cloneAliasMap returns a deep copy of the alias map. Every mutation is
+// prepared on a copy so a failed metadata write can never partially alter
+// the previously visible state.
+func cloneAliasMap(src map[string][]string) map[string][]string {
+	dst := make(map[string][]string, len(src))
+	for alias, indexes := range src {
+		cp := make([]string, len(indexes))
+		copy(cp, indexes)
+		dst[alias] = cp
+	}
+	return dst
+}
 
-	err := metadata.Alias.Set(al.Aliases)
-	if err != nil {
-		log.Err(err).Msg("failed to save alias in metadata after add operation")
-		al.lock.Unlock()
+// publishLocked persists next and, only on success, publishes it as the
+// visible state. The caller must hold al.lock. When persistence fails the
+// previously visible state is kept, so the original request stays retryable
+// against unchanged state.
+func (al *AliasList) publishLocked(next map[string][]string) error {
+	if err := metadata.Alias.Set(next); err != nil {
+		log.Err(err).Msg("failed to save alias in metadata")
 		return err
 	}
-
-	al.lock.Unlock()
+	al.Aliases = next
 	return nil
+}
+
+// withWriteLock runs fn while holding the alias write lock. Index deletion
+// uses it to serialize against alias updates: concurrent alias changes and
+// index deletion can only commit one after another, producing a single
+// committed target set instead of interleaved half states.
+func (al *AliasList) withWriteLock(fn func() error) error {
+	al.lock.Lock()
+	defer al.lock.Unlock()
+	return fn()
+}
+
+func (al *AliasList) AddIndexesToAlias(alias string, indexes []string) error {
+	al.lock.Lock()
+	defer al.lock.Unlock()
+
+	next := cloneAliasMap(al.Aliases)
+	current := append([]string{}, next[alias]...)
+	changed := false
+	for _, index := range indexes {
+		// an alias member is unique, so a retried add never duplicates it
+		if zutils.SliceExists(current, index) {
+			continue
+		}
+		current = append(current, index)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	next[alias] = current
+
+	return al.publishLocked(next)
 }
 
 func (al *AliasList) RemoveIndexesFromAlias(alias string, removeIndexes []string) error {
 	al.lock.Lock()
+	defer al.lock.Unlock()
 
-	indexes, ok := al.Aliases[alias]
+	current, ok := al.Aliases[alias]
 	if !ok {
-		al.lock.Unlock()
 		return nil
 	}
 
-	removeIndexesMap := make(map[string]bool)
+	removeIndexesMap := make(map[string]struct{}, len(removeIndexes))
 	for _, index := range removeIndexes {
-		removeIndexesMap[index] = true
+		removeIndexesMap[index] = struct{}{}
 	}
 
-	lastIndex := len(indexes)
-	for i := 0; i < lastIndex; i++ {
-		if _, ok := removeIndexesMap[indexes[i]]; ok {
-			indexes[lastIndex-1], indexes[i] = indexes[i], indexes[lastIndex-1]
-			i--
-			lastIndex--
+	next := cloneAliasMap(al.Aliases)
+	kept := make([]string, 0, len(current))
+	changed := false
+	for _, index := range next[alias] {
+		if _, ok := removeIndexesMap[index]; ok {
+			changed = true
+			continue
+		}
+		kept = append(kept, index)
+	}
+	if !changed {
+		return nil
+	}
+
+	// removing the last member removes the alias, so an alias never
+	// describes an index set that is not searchable
+	if len(kept) == 0 {
+		delete(next, alias)
+	} else {
+		next[alias] = kept
+	}
+
+	return al.publishLocked(next)
+}
+
+// RemoveIndex detaches indexName from every alias and drops aliases left
+// without members. The change is persisted as one transaction; on
+// persistence failure the previous state is restored. It returns true when
+// at least one alias referenced the index.
+func (al *AliasList) RemoveIndex(indexName string) (bool, error) {
+	al.lock.Lock()
+	defer al.lock.Unlock()
+	return al.removeIndexLocked(indexName)
+}
+
+// removeIndexLocked is RemoveIndex for callers that already hold the alias
+// write lock (e.g. DeleteIndex, which must commit index removal and alias
+// detachment as one serialized change).
+func (al *AliasList) removeIndexLocked(indexName string) (bool, error) {
+	next := cloneAliasMap(al.Aliases)
+	changed := false
+	for aliasName, indexes := range next {
+		kept := make([]string, 0, len(indexes))
+		removed := false
+		for _, index := range indexes {
+			if index == indexName {
+				removed = true
+				continue
+			}
+			kept = append(kept, index)
+		}
+		if !removed {
+			continue
+		}
+		changed = true
+		if len(kept) == 0 {
+			delete(next, aliasName)
+		} else {
+			next[aliasName] = kept
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+
+	if err := al.publishLocked(next); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ApplyMembers atomically applies a batch of alias adds and removes: all
+// adds are merged first, then all removes, matching Elasticsearch
+// _aliases semantics. An add only commits indexes that currently exist, so
+// an index deleted concurrently (serialized by the same write lock) can
+// never become a committed alias target. Members are unique and an alias
+// without members is removed. Either the whole batch is committed or the
+// previous state stays visible and the error is returned for retry.
+func (al *AliasList) ApplyMembers(addMembers, removeMembers map[string][]string) error {
+	al.lock.Lock()
+	defer al.lock.Unlock()
+
+	next := cloneAliasMap(al.Aliases)
+	changed := false
+
+	for alias, indexes := range addMembers {
+		current := append([]string{}, next[alias]...)
+		for _, index := range indexes {
+			if _, ok := ZINC_INDEX_LIST.Get(index); !ok {
+				// index does not exist (possibly deleted concurrently); skip it
+				continue
+			}
+			if zutils.SliceExists(current, index) {
+				continue
+			}
+			current = append(current, index)
+			changed = true
+		}
+		if len(current) > 0 {
+			next[alias] = current
 		}
 	}
 
-	al.Aliases[alias] = indexes[:lastIndex]
+	for alias, indexes := range removeMembers {
+		current, ok := next[alias]
+		if !ok {
+			continue
+		}
 
-	err := metadata.Alias.Set(al.Aliases)
-	if err != nil {
-		log.Err(err).Msg("failed to save alias in metadata after remove operation")
-		al.lock.Unlock()
-		return err
+		removeIndexesMap := make(map[string]struct{}, len(indexes))
+		for _, index := range indexes {
+			removeIndexesMap[index] = struct{}{}
+		}
+
+		kept := make([]string, 0, len(current))
+		for _, index := range current {
+			if _, ok := removeIndexesMap[index]; ok {
+				changed = true
+				continue
+			}
+			kept = append(kept, index)
+		}
+		if len(kept) == 0 {
+			delete(next, alias)
+		} else {
+			next[alias] = kept
+		}
 	}
 
-	al.lock.Unlock()
+	if !changed {
+		return nil
+	}
+	return al.publishLocked(next)
+}
+
+// PruneInvalidAliases removes alias members referencing indexes that are not
+// loaded and deletes aliases without members. It runs at startup so an alias
+// can never resolve to an index that a previous version or an interrupted
+// deletion left behind; after a restart alias search only sees targets that
+// actually exist. The in-memory state is always pruned, and the pruned map
+// is persisted best-effort.
+func (al *AliasList) PruneInvalidAliases() error {
+	al.lock.Lock()
+	defer al.lock.Unlock()
+
+	next := cloneAliasMap(al.Aliases)
+	changed := false
+	for aliasName, indexes := range next {
+		kept := make([]string, 0, len(indexes))
+		removed := false
+		for _, index := range indexes {
+			if _, ok := ZINC_INDEX_LIST.Get(index); !ok {
+				removed = true
+				continue
+			}
+			kept = append(kept, index)
+		}
+		if !removed {
+			continue
+		}
+		changed = true
+		if len(kept) == 0 {
+			delete(next, aliasName)
+		} else {
+			next[aliasName] = kept
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+
+	// publish the pruned state even when persistence fails: for the running
+	// process no dangling target is visible; the next successful alias
+	// update writes the converged map. Report the error so callers can log it.
+	if err := metadata.Alias.Set(next); err != nil {
+		log.Err(err).Msg("failed to persist pruned aliases at startup, serving pruned state in memory")
+		al.Aliases = next
+		return err
+	}
+	al.Aliases = next
 	return nil
 }
 
@@ -129,7 +335,7 @@ outerLoop:
 			continue outerLoop
 		}
 
-	innerLoop:
+		innerLoop:
 		for _, index := range indexes {
 			if len(targetIndexes) > 0 && !zutils.SliceExists(targetIndexes, index) { // check if this is one of the indexes we're looking for
 				continue innerLoop

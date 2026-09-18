@@ -2077,6 +2077,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/meta.HTTPResponseError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/meta.HTTPResponseError'
       security:
       - BasicAuth: []
       summary: Add or remove index alias for compatible ES

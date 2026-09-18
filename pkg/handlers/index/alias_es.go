@@ -51,6 +51,7 @@ type base struct {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} meta.HTTPResponseError
+// @Failure 500 {object} meta.HTTPResponseError
 // @Router /es/_aliases [post]
 func AddOrRemoveESAlias(c *gin.Context) {
 	var alias Alias
@@ -93,12 +94,13 @@ func AddOrRemoveESAlias(c *gin.Context) {
 		}
 	}
 
-	for alias, indexes := range addMap {
-		_ = core.ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(alias, indexes)
-	}
-
-	for alias, indexes := range removeMap {
-		_ = core.ZINC_INDEX_ALIAS_LIST.RemoveIndexesFromAlias(alias, indexes)
+	// Apply all adds and removes as one committed transaction. If the alias
+	// metadata cannot be persisted, the previous alias state stays visible
+	// and the same request can be retried; surface the failure instead of
+	// acknowledging a change that may not have been committed.
+	if err := core.ZINC_INDEX_ALIAS_LIST.ApplyMembers(addMap, removeMap); err != nil {
+		zutils.GinRenderJSON(c, http.StatusInternalServerError, meta.HTTPResponseError{Error: err.Error()})
+		return
 	}
 
 	zutils.GinRenderJSON(c, http.StatusOK, gin.H{"acknowledged": true})

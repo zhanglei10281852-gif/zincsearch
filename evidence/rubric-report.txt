@@ -1,0 +1,13 @@
+项目：zincsearch-zincsearch-3278c106-1a1a-4108-bf25-c0e927a04bcf
+固定版本：c72e6ee64229b45117dad52d9aa67cb5ff6a289f
+Session：573311172224344:3f2d331312a7ec51ee77c3f81930889a_6aad2b1737c4befb90774050.6aad2b1737c4befb90774053.6aad2b1737c4befb90774051:TraeCode CN.3.3.93.no_sid.no_ppe.T(2026/9/18 20:14:15)
+验证命令：go test -count=1 ./pkg/core ./pkg/handlers/index
+验证结果：编译失败，test/utils/metadata.go:52、72、81 引用不存在的 errors.ErrKeyEmpty 和 errors.ErrKeyNotFound。
+
+Rubric ID：1｜状态：通过｜期望行为：删除被别名引用的索引后，当前进程中的别名展开和别名搜索不再包含该索引，直接访问已删除索引保持不存在语义。｜实际观察：DeleteIndex 在 AliasList 写锁内调用 removeIndexLocked 删除所有别名成员并持久化，然后从 IndexList 删除索引；删除后别名读取路径只取得剩余成员。｜直接证据：pkg/core/deleteindex.go:95-141；pkg/core/aliaslist.go:139-185、294-319。
+Rubric ID：2｜状态：通过｜期望行为：重启从 metadata 加载后，已删除索引不重新出现在别名目标中，仍存在成员可搜索。｜实际观察：启动加载索引后调用 PruneInvalidAliases，逐个剔除不在 IndexList 的目标并将裁剪结果写回 alias metadata。｜直接证据：pkg/core/indexlist.go:61-71；pkg/core/aliaslist.go:245-291。
+Rubric ID：3｜状态：通过｜期望行为：别名 metadata 写入失败保留此前内存和持久化视图，返回可判断错误并可按原请求重试。｜实际观察：publishLocked 先调用 metadata.Alias.Set，失败直接返回且不替换 Aliases；HTTP handler 将错误返回 500，下一次请求仍面对旧状态。｜直接证据：pkg/core/aliaslist.go:54-62、73-134；pkg/handlers/index/alias_es.go:91-107。
+Rubric ID：4｜状态：通过｜期望行为：物理目录删除失败与索引 metadata 删除失败保持可恢复，不发布半截索引或悬空别名。｜实际观察：索引 metadata 删除失败在提交前返回；别名提交失败通过序列化 index metadata 补偿恢复；物理删除失败返回带路径错误，后续 DeleteIndex 进入 orphaned cleanup 重试。｜直接证据：pkg/core/deleteindex.go:107-164；pkg/core/deleteindex.go:31-63。
+Rubric ID：5｜状态：通过｜期望行为：别名变更与索引删除交错时只形成一个已提交且可搜索的目标集合。｜实际观察：DeleteIndex、AddIndexesToAlias、RemoveIndexesFromAlias、ApplyMembers 共用 AliasList 写锁，提交前复制 map，metadata 成功后一次替换可见状态。｜直接证据：pkg/core/aliaslist.go:54-71、73-238；pkg/core/deleteindex.go:95-141。
+Rubric ID：6｜状态：不通过｜期望行为：普通无别名删除、别名管理、别名搜索和直接索引搜索保持请求格式、权限和错误兼容，并有独立回归证据。｜实际观察：固定验证命令在测试编译阶段停止，未产生任何回归测试结果；新增测试工具无法编译。｜直接证据：命令输出“test/utils/metadata.go:52:17: undefined: errors.ErrKeyEmpty；test/utils/metadata.go:72:22: undefined: errors.ErrKeyNotFound；test/utils/metadata.go:81:17: undefined: errors.ErrKeyEmpty”。｜原因：回归验证未执行。｜影响：无法证明普通删除、别名接口和直接搜索的运行时兼容性。｜证据位置：F:\swe\091801\project-01\test\utils\metadata.go:52、72、81；go test 输出。
+Rubric ID：7｜状态：不通过｜期望行为：多索引别名的单索引/多索引搜索、重启加载及后续增删围绕同一提交状态工作。｜实际观察：固定验证命令在测试编译阶段停止，未执行多索引搜索、重启和后续增删用例。｜直接证据：同一 go test 输出在 test/utils/metadata.go 编译错误后退出代码 1。｜原因：多索引运行时验证未执行。｜影响：没有可复现证据证明多索引搜索和重启后的连续增删行为。｜证据位置：F:\swe\091801\project-01\test\utils\metadata.go:52、72、81；go test 输出。

@@ -1,0 +1,1428 @@
+diff --git a/docs/docs.go b/docs/docs.go
+index 06b19cc..b87fa73 100644
+--- a/docs/docs.go
++++ b/docs/docs.go
+@@ -1557,6 +1557,12 @@ const docTemplate = `{
+                         "schema": {
+                             "$ref": "#/definitions/meta.HTTPResponseError"
+                         }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/meta.HTTPResponseError"
++                        }
+                     }
+                 }
+             }
+diff --git a/docs/swagger.json b/docs/swagger.json
+index a18ccdd..c4fd59e 100644
+--- a/docs/swagger.json
++++ b/docs/swagger.json
+@@ -1554,6 +1554,12 @@
+                         "schema": {
+                             "$ref": "#/definitions/meta.HTTPResponseError"
+                         }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/meta.HTTPResponseError"
++                        }
+                     }
+                 }
+             }
+diff --git a/docs/swagger.yaml b/docs/swagger.yaml
+index 1f5f8ed..80b12f6 100644
+--- a/docs/swagger.yaml
++++ b/docs/swagger.yaml
+@@ -2077,6 +2077,10 @@ paths:
+           description: Bad Request
+           schema:
+             $ref: '#/definitions/meta.HTTPResponseError'
++        "500":
++          description: Internal Server Error
++          schema:
++            $ref: '#/definitions/meta.HTTPResponseError'
+       security:
+       - BasicAuth: []
+       summary: Add or remove index alias for compatible ES
+diff --git a/pkg/core/aliaslist.go b/pkg/core/aliaslist.go
+index 7ec1c78..64eb7e4 100644
+--- a/pkg/core/aliaslist.go
++++ b/pkg/core/aliaslist.go
+@@ -34,54 +34,260 @@ func NewAliasList() *AliasList {
+ 	return &AliasList{Aliases: map[string][]string{}}
+ }
+ 
++// cloneAliasMap returns a deep copy of the alias map. Every mutation is
++// prepared on a copy so a failed metadata write can never partially alter
++// the previously visible state.
++func cloneAliasMap(src map[string][]string) map[string][]string {
++	dst := make(map[string][]string, len(src))
++	for alias, indexes := range src {
++		cp := make([]string, len(indexes))
++		copy(cp, indexes)
++		dst[alias] = cp
++	}
++	return dst
++}
++
++// publishLocked persists next and, only on success, publishes it as the
++// visible state. The caller must hold al.lock. When persistence fails the
++// previously visible state is kept, so the original request stays retryable
++// against unchanged state.
++func (al *AliasList) publishLocked(next map[string][]string) error {
++	if err := metadata.Alias.Set(next); err != nil {
++		log.Err(err).Msg("failed to save alias in metadata")
++		return err
++	}
++	al.Aliases = next
++	return nil
++}
++
++// withWriteLock runs fn while holding the alias write lock. Index deletion
++// uses it to serialize against alias updates: concurrent alias changes and
++// index deletion can only commit one after another, producing a single
++// committed target set instead of interleaved half states.
++func (al *AliasList) withWriteLock(fn func() error) error {
++	al.lock.Lock()
++	defer al.lock.Unlock()
++	return fn()
++}
++
+ func (al *AliasList) AddIndexesToAlias(alias string, indexes []string) error {
+ 	al.lock.Lock()
+-	al.Aliases[alias] = append(al.Aliases[alias], indexes...)
++	defer al.lock.Unlock()
+ 
+-	err := metadata.Alias.Set(al.Aliases)
+-	if err != nil {
+-		log.Err(err).Msg("failed to save alias in metadata after add operation")
+-		al.lock.Unlock()
+-		return err
++	next := cloneAliasMap(al.Aliases)
++	current := append([]string{}, next[alias]...)
++	changed := false
++	for _, index := range indexes {
++		// an alias member is unique, so a retried add never duplicates it
++		if zutils.SliceExists(current, index) {
++			continue
++		}
++		current = append(current, index)
++		changed = true
+ 	}
++	if !changed {
++		return nil
++	}
++	next[alias] = current
+ 
+-	al.lock.Unlock()
+-	return nil
++	return al.publishLocked(next)
+ }
+ 
+ func (al *AliasList) RemoveIndexesFromAlias(alias string, removeIndexes []string) error {
+ 	al.lock.Lock()
++	defer al.lock.Unlock()
+ 
+-	indexes, ok := al.Aliases[alias]
++	current, ok := al.Aliases[alias]
+ 	if !ok {
+-		al.lock.Unlock()
+ 		return nil
+ 	}
+ 
+-	removeIndexesMap := make(map[string]bool)
++	removeIndexesMap := make(map[string]struct{}, len(removeIndexes))
+ 	for _, index := range removeIndexes {
+-		removeIndexesMap[index] = true
++		removeIndexesMap[index] = struct{}{}
++	}
++
++	next := cloneAliasMap(al.Aliases)
++	kept := make([]string, 0, len(current))
++	changed := false
++	for _, index := range next[alias] {
++		if _, ok := removeIndexesMap[index]; ok {
++			changed = true
++			continue
++		}
++		kept = append(kept, index)
++	}
++	if !changed {
++		return nil
++	}
++
++	// removing the last member removes the alias, so an alias never
++	// describes an index set that is not searchable
++	if len(kept) == 0 {
++		delete(next, alias)
++	} else {
++		next[alias] = kept
+ 	}
+ 
+-	lastIndex := len(indexes)
+-	for i := 0; i < lastIndex; i++ {
+-		if _, ok := removeIndexesMap[indexes[i]]; ok {
+-			indexes[lastIndex-1], indexes[i] = indexes[i], indexes[lastIndex-1]
+-			i--
+-			lastIndex--
++	return al.publishLocked(next)
++}
++
++// RemoveIndex detaches indexName from every alias and drops aliases left
++// without members. The change is persisted as one transaction; on
++// persistence failure the previous state is restored. It returns true when
++// at least one alias referenced the index.
++func (al *AliasList) RemoveIndex(indexName string) (bool, error) {
++	al.lock.Lock()
++	defer al.lock.Unlock()
++	return al.removeIndexLocked(indexName)
++}
++
++// removeIndexLocked is RemoveIndex for callers that already hold the alias
++// write lock (e.g. DeleteIndex, which must commit index removal and alias
++// detachment as one serialized change).
++func (al *AliasList) removeIndexLocked(indexName string) (bool, error) {
++	next := cloneAliasMap(al.Aliases)
++	changed := false
++	for aliasName, indexes := range next {
++		kept := make([]string, 0, len(indexes))
++		removed := false
++		for _, index := range indexes {
++			if index == indexName {
++				removed = true
++				continue
++			}
++			kept = append(kept, index)
++		}
++		if !removed {
++			continue
++		}
++		changed = true
++		if len(kept) == 0 {
++			delete(next, aliasName)
++		} else {
++			next[aliasName] = kept
+ 		}
+ 	}
++	if !changed {
++		return false, nil
++	}
+ 
+-	al.Aliases[alias] = indexes[:lastIndex]
++	if err := al.publishLocked(next); err != nil {
++		return false, err
++	}
++	return true, nil
++}
+ 
+-	err := metadata.Alias.Set(al.Aliases)
+-	if err != nil {
+-		log.Err(err).Msg("failed to save alias in metadata after remove operation")
+-		al.lock.Unlock()
+-		return err
++// ApplyMembers atomically applies a batch of alias adds and removes: all
++// adds are merged first, then all removes, matching Elasticsearch
++// _aliases semantics. An add only commits indexes that currently exist, so
++// an index deleted concurrently (serialized by the same write lock) can
++// never become a committed alias target. Members are unique and an alias
++// without members is removed. Either the whole batch is committed or the
++// previous state stays visible and the error is returned for retry.
++func (al *AliasList) ApplyMembers(addMembers, removeMembers map[string][]string) error {
++	al.lock.Lock()
++	defer al.lock.Unlock()
++
++	next := cloneAliasMap(al.Aliases)
++	changed := false
++
++	for alias, indexes := range addMembers {
++		current := append([]string{}, next[alias]...)
++		for _, index := range indexes {
++			if _, ok := ZINC_INDEX_LIST.Get(index); !ok {
++				// index does not exist (possibly deleted concurrently); skip it
++				continue
++			}
++			if zutils.SliceExists(current, index) {
++				continue
++			}
++			current = append(current, index)
++			changed = true
++		}
++		if len(current) > 0 {
++			next[alias] = current
++		}
++	}
++
++	for alias, indexes := range removeMembers {
++		current, ok := next[alias]
++		if !ok {
++			continue
++		}
++
++		removeIndexesMap := make(map[string]struct{}, len(indexes))
++		for _, index := range indexes {
++			removeIndexesMap[index] = struct{}{}
++		}
++
++		kept := make([]string, 0, len(current))
++		for _, index := range current {
++			if _, ok := removeIndexesMap[index]; ok {
++				changed = true
++				continue
++			}
++			kept = append(kept, index)
++		}
++		if len(kept) == 0 {
++			delete(next, alias)
++		} else {
++			next[alias] = kept
++		}
+ 	}
+ 
+-	al.lock.Unlock()
++	if !changed {
++		return nil
++	}
++	return al.publishLocked(next)
++}
++
++// PruneInvalidAliases removes alias members referencing indexes that are not
++// loaded and deletes aliases without members. It runs at startup so an alias
++// can never resolve to an index that a previous version or an interrupted
++// deletion left behind; after a restart alias search only sees targets that
++// actually exist. The in-memory state is always pruned, and the pruned map
++// is persisted best-effort.
++func (al *AliasList) PruneInvalidAliases() error {
++	al.lock.Lock()
++	defer al.lock.Unlock()
++
++	next := cloneAliasMap(al.Aliases)
++	changed := false
++	for aliasName, indexes := range next {
++		kept := make([]string, 0, len(indexes))
++		removed := false
++		for _, index := range indexes {
++			if _, ok := ZINC_INDEX_LIST.Get(index); !ok {
++				removed = true
++				continue
++			}
++			kept = append(kept, index)
++		}
++		if !removed {
++			continue
++		}
++		changed = true
++		if len(kept) == 0 {
++			delete(next, aliasName)
++		} else {
++			next[aliasName] = kept
++		}
++	}
++
++	if !changed {
++		return nil
++	}
++
++	// publish the pruned state even when persistence fails: for the running
++	// process no dangling target is visible; the next successful alias
++	// update writes the converged map. Report the error so callers can log it.
++	if err := metadata.Alias.Set(next); err != nil {
++		log.Err(err).Msg("failed to persist pruned aliases at startup, serving pruned state in memory")
++		al.Aliases = next
++		return err
++	}
++	al.Aliases = next
+ 	return nil
+ }
+ 
+@@ -129,7 +335,7 @@ outerLoop:
+ 			continue outerLoop
+ 		}
+ 
+-	innerLoop:
++		innerLoop:
+ 		for _, index := range indexes {
+ 			if len(targetIndexes) > 0 && !zutils.SliceExists(targetIndexes, index) { // check if this is one of the indexes we're looking for
+ 				continue innerLoop
+diff --git a/pkg/core/aliaslist_test.go b/pkg/core/aliaslist_test.go
+index 66e1511..913304f 100644
+--- a/pkg/core/aliaslist_test.go
++++ b/pkg/core/aliaslist_test.go
+@@ -16,11 +16,27 @@
+ package core
+ 
+ import (
++	"errors"
++	"fmt"
++	"sync"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/require"
++
++	"github.com/zincsearch/zincsearch/pkg/metadata"
++	"github.com/zincsearch/zincsearch/test/utils"
+ )
+ 
++// withMemMetadata swaps the metadata storage for an in-memory one that can
++// inject failures; the previous backend is restored when the test ends.
++func withMemMetadata(t *testing.T) *utils.MemStorage {
++	t.Helper()
++	mem := utils.NewMemStorage()
++	prev := metadata.SetDB(mem)
++	t.Cleanup(func() { metadata.SetDB(prev) })
++	return mem
++}
++
+ func TestAliasList_AddIndexesToAlias(t *testing.T) {
+ 	type args struct {
+ 		alias   string
+@@ -302,3 +318,251 @@ func TestAliasList_GetAliasMap(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestAliasList_AddRollbackAndRetryOnPersistError(t *testing.T) {
++	mem := withMemMetadata(t)
++	al := NewAliasList()
++
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_1"}))
++
++	// a metadata write failure must keep the previously visible state
++	mem.FailSet = func(string) error { return errors.New("metadata write failed") }
++	err := al.AddIndexesToAlias("logs_daily", []string{"logs_2"})
++	require.Error(t, err)
++
++	indexes, ok := al.GetIndexesForAlias("logs_daily")
++	require.True(t, ok)
++	require.Equal(t, []string{"logs_1"}, indexes)
++
++	// the persisted state must not contain half of the failed add
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Equal(t, []string{"logs_1"}, stored["logs_daily"])
++
++	// the original request retries successfully once storage is healthy
++	mem.FailSet = nil
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_2"}))
++	indexes, _ = al.GetIndexesForAlias("logs_daily")
++	require.Equal(t, []string{"logs_1", "logs_2"}, indexes)
++}
++
++func TestAliasList_RemoveRollbackRetryAndEmptyAlias(t *testing.T) {
++	mem := withMemMetadata(t)
++	al := NewAliasList()
++
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_1", "logs_2", "logs_3"}))
++
++	mem.FailSet = func(string) error { return errors.New("metadata write failed") }
++	err := al.RemoveIndexesFromAlias("logs_daily", []string{"logs_2"})
++	require.Error(t, err)
++
++	indexes, ok := al.GetIndexesForAlias("logs_daily")
++	require.True(t, ok)
++	require.Equal(t, []string{"logs_1", "logs_2", "logs_3"}, indexes)
++
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Equal(t, []string{"logs_1", "logs_2", "logs_3"}, stored["logs_daily"])
++
++	mem.FailSet = nil
++	require.NoError(t, al.RemoveIndexesFromAlias("logs_daily", []string{"logs_2"}))
++	indexes, _ = al.GetIndexesForAlias("logs_daily")
++	require.Equal(t, []string{"logs_1", "logs_3"}, indexes)
++
++	// removing the last member removes the alias, it no longer describes
++	// something that cannot be searched
++	require.NoError(t, al.RemoveIndexesFromAlias("logs_daily", []string{"logs_1", "logs_3"}))
++	_, ok = al.GetIndexesForAlias("logs_daily")
++	require.False(t, ok)
++
++	stored, err = metadata.Alias.Get()
++	require.NoError(t, err)
++	require.NotContains(t, stored, "logs_daily")
++}
++
++func TestAliasList_AddDeduplicatesMembers(t *testing.T) {
++	withMemMetadata(t)
++	al := NewAliasList()
++
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_1"}))
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_1"}))
++
++	indexes, ok := al.GetIndexesForAlias("logs_daily")
++	require.True(t, ok)
++	require.Equal(t, []string{"logs_1"}, indexes)
++}
++
++func TestAliasList_RemoveIndex(t *testing.T) {
++	withMemMetadata(t)
++	al := NewAliasList()
++
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"logs_1", "logs_2"}))
++	require.NoError(t, al.AddIndexesToAlias("logs_weekly", []string{"logs_1"}))
++
++	changed, err := al.RemoveIndex("logs_1")
++	require.NoError(t, err)
++	require.True(t, changed)
++
++	indexes, ok := al.GetIndexesForAlias("logs_daily")
++	require.True(t, ok)
++	require.Equal(t, []string{"logs_2"}, indexes)
++
++	// alias left without members disappears
++	_, ok = al.GetIndexesForAlias("logs_weekly")
++	require.False(t, ok)
++
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Equal(t, map[string][]string{"logs_daily": {"logs_2"}}, stored)
++
++	// idempotent: removing an index no alias references changes nothing
++	changed, err = al.RemoveIndex("logs_1")
++	require.NoError(t, err)
++	require.False(t, changed)
++}
++
++func TestAliasList_ApplyMembersFull(t *testing.T) {
++	mem := withMemMetadata(t)
++
++	liveIndex := "TestAliasList_ApplyMembersFull.index_1"
++	index, err := NewIndex(liveIndex, "disk", 1)
++	require.NoError(t, err)
++	require.NoError(t, StoreIndex(index))
++	t.Cleanup(func() {
++		ZINC_INDEX_LIST.Delete(liveIndex)
++		_ = removeAll(indexDataPath(liveIndex))
++	})
++
++	al := NewAliasList()
++
++	// existing index added, unknown skipped, duplicates collapse
++	require.NoError(t, al.ApplyMembers(
++		map[string][]string{"a1": {liveIndex, "index_that_does_not_exist", liveIndex}},
++		nil,
++	))
++	indexes, ok := al.GetIndexesForAlias("a1")
++	require.True(t, ok)
++	require.Equal(t, []string{liveIndex}, indexes)
++
++	// add + remove the same member in one request: remove wins, whole batch
++	// is one commit
++	require.NoError(t, al.ApplyMembers(
++		map[string][]string{"a1": {liveIndex}},
++		map[string][]string{"a1": {liveIndex}},
++	))
++	_, ok = al.GetIndexesForAlias("a1")
++	require.False(t, ok)
++
++	// persistence failure rolls the whole batch back
++	require.NoError(t, al.ApplyMembers(map[string][]string{"a2": {liveIndex}}, nil))
++	mem.FailSet = func(string) error { return errors.New("metadata write failed") }
++	err = al.ApplyMembers(
++		map[string][]string{"a3": {liveIndex}},
++		map[string][]string{"a2": {liveIndex}},
++	)
++	require.Error(t, err)
++	indexes, ok = al.GetIndexesForAlias("a2")
++	require.True(t, ok)
++	require.Equal(t, []string{liveIndex}, indexes)
++	_, ok = al.GetIndexesForAlias("a3")
++	require.False(t, ok)
++
++	// retry same intent after recovery
++	mem.FailSet = nil
++	require.NoError(t, al.ApplyMembers(
++		map[string][]string{"a3": {liveIndex}},
++		map[string][]string{"a2": {liveIndex}},
++	))
++	_, ok = al.GetIndexesForAlias("a2")
++	require.False(t, ok)
++	indexes, ok = al.GetIndexesForAlias("a3")
++	require.True(t, ok)
++	require.Equal(t, []string{liveIndex}, indexes)
++}
++
++func TestAliasList_PruneInvalidAliases(t *testing.T) {
++	mem := withMemMetadata(t)
++
++	liveIndex := "TestAliasList_PruneInvalidAliases.index_1"
++	index, err := NewIndex(liveIndex, "disk", 1)
++	require.NoError(t, err)
++	require.NoError(t, StoreIndex(index))
++	t.Cleanup(func() {
++		ZINC_INDEX_LIST.Delete(liveIndex)
++		_ = removeAll(indexDataPath(liveIndex))
++	})
++
++	al := NewAliasList()
++	al.Aliases = map[string][]string{
++		"keep":  {liveIndex},
++		"gone":  {"index_not_loaded_1"},
++		"mixed": {liveIndex, "index_not_loaded_2"},
++	}
++
++	require.NoError(t, al.PruneInvalidAliases())
++
++	indexes, ok := al.GetIndexesForAlias("keep")
++	require.True(t, ok)
++	require.Equal(t, []string{liveIndex}, indexes)
++	_, ok = al.GetIndexesForAlias("gone")
++	require.False(t, ok)
++	indexes, ok = al.GetIndexesForAlias("mixed")
++	require.True(t, ok)
++	require.Equal(t, []string{liveIndex}, indexes)
++
++	// pruned state is what a restart would load
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Equal(t, al.Aliases, stored)
++
++	// if persistence fails at startup the running process still serves the
++	// pruned state and reports the error
++	al.Aliases = map[string][]string{"gone2": {"index_not_loaded_3"}}
++	mem.FailSet = func(string) error { return errors.New("metadata write failed") }
++	err = al.PruneInvalidAliases()
++	require.Error(t, err)
++	_, ok = al.GetIndexesForAlias("gone2")
++	require.False(t, ok)
++	mem.FailSet = nil
++}
++
++func TestAliasList_ConcurrentChangesCommitOneSet(t *testing.T) {
++	withMemMetadata(t)
++	al := NewAliasList()
++	require.NoError(t, al.AddIndexesToAlias("logs_daily", []string{"seed"}))
++
++	const n = 50
++	var wg sync.WaitGroup
++	for i := 0; i < n; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			name := fmt.Sprintf("logs_%02d", i)
++			_ = al.AddIndexesToAlias("logs_daily", []string{name})
++		}(i)
++	}
++
++	// index deletion detaching a member races with the adds
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		_, _ = al.RemoveIndex("seed")
++	}()
++
++	wg.Wait()
++
++	indexes, ok := al.GetIndexesForAlias("logs_daily")
++	require.True(t, ok)
++	require.Len(t, indexes, n, "all adds must be committed exactly once, seed removed")
++	uniq := make(map[string]struct{}, n)
++	for _, name := range indexes {
++		require.NotEqual(t, "seed", name)
++		uniq[name] = struct{}{}
++	}
++	require.Len(t, uniq, n, "committed set must contain no duplicates")
++
++	// memory and persisted metadata describe the same committed set
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.ElementsMatch(t, indexes, stored["logs_daily"])
++}
+diff --git a/pkg/core/deleteindex.go b/pkg/core/deleteindex.go
+index 16ae9f4..1336814 100644
+--- a/pkg/core/deleteindex.go
++++ b/pkg/core/deleteindex.go
+@@ -17,31 +17,159 @@ package core
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"os"
++	"path/filepath"
++	"time"
+ 
+ 	"github.com/rs/zerolog/log"
+ 
+ 	"github.com/zincsearch/zincsearch/pkg/config"
++	zincErrors "github.com/zincsearch/zincsearch/pkg/errors"
+ 	"github.com/zincsearch/zincsearch/pkg/metadata"
+ )
+ 
++// removeAll removes the index data directory. It is a package variable so
++// tests can simulate a physical deletion failure.
++var removeAll = os.RemoveAll
++
++// removeIndexRetryInterval / removeIndexRetryAttempts bound the wait for OS
++// file handles to be released after the index writers are closed (on Windows
++// the delete can briefly race the closing process).
++var (
++	removeIndexRetryInterval = 100 * time.Millisecond
++	removeIndexRetryAttempts = 10
++)
++
++func indexDataPath(name string) string {
++	return filepath.Join(config.Global.DataPath, name)
++}
++
++// removeIndexDirectory deletes the data directory, retrying transient
++// "still in use" failures after the writers were closed. It returns the
++// concrete OS error only after the retries are exhausted, leaving a
++// recoverable leftover directory.
++func removeIndexDirectory(dataPath string) error {
++	var err error
++	for attempt := 0; attempt < removeIndexRetryAttempts; attempt++ {
++		if err = removeAll(dataPath); err == nil {
++			return nil
++		}
++		if _, statErr := os.Stat(dataPath); statErr != nil {
++			return nil // directory is already gone despite the reported error
++		}
++		time.Sleep(removeIndexRetryInterval)
++	}
++	return err
++}
++
++// DeleteIndex deletes an index and detaches it from every alias.
++//
++// The metadata writes for the index and its aliases are serialized with all
++// other alias updates under the alias write lock, so a concurrent alias
++// change and index deletion can only produce one committed target set.
++//
++// Commit order inside the lock:
++//  1. delete the index metadata key (commit point); on failure nothing was
++//     touched and the index stays fully searchable;
++//  2. persist the alias map without this index; on failure the deleted
++//     index metadata is restored as a compensating action and the whole
++//     request stays retryable;
++//  3. close and evict the in-memory index, after which neither direct nor
++//     alias search can reach it in the running process.
++//
++// The physical data directory is removed only after that commit. If removal
++// fails, metadata/cache/aliases already agree the index is gone (a restart
++// cannot resurrect it or any dangling alias target); the concrete error is
++// returned and retrying DeleteIndex cleans the leftover directory up.
+ func DeleteIndex(name string) error {
+-	// 1. Check if index exists
+-	index, exists := GetIndex(name)
+-	if !exists {
+-		return errors.New("index " + name + " does not exists")
++	// Fast path without the coordination lock. If the index is not cached it
++	// may still have a leftover data directory from a failed physical removal
++	// of an already committed deletion; make that cleanup idempotent and
++	// retryable instead of reporting the index as existing.
++	if _, exists := GetIndex(name); !exists {
++		return deleteOrphanedIndex(name)
+ 	}
+ 
+-	// 2. Close and Delete from cache
+-	ZINC_INDEX_LIST.Delete(name)
++	dataPath := ""
++	err := ZINC_INDEX_ALIAS_LIST.withWriteLock(func() error {
++		// re-check under the lock, a concurrent deletion may have committed
++		index, exists := ZINC_INDEX_LIST.Get(name)
++		if !exists {
++			return errors.New("index " + name + " does not exists")
++		}
++
++		// keep a serialized copy of the index metadata so an alias
++		// persistence failure can fully restore the committed deletion
++		indexData, err := index.MarshalJSON()
++		if err != nil {
++			return fmt.Errorf("failed to marshal index[%s] before deletion: %w", name, err)
++		}
++
++		// 1. commit the index metadata deletion first; a restart must never
++		// resurrect the index nor any alias pointing at it
++		if err := metadata.Index.Delete(name); err != nil {
++			return fmt.Errorf("failed to delete index[%s] metadata: %w", name, err)
++		}
++
++		// 2. persist aliases without this index; roll the index metadata
++		// deletion back if the alias commit fails, so no half state is
++		// published and the original request can be retried as-is
++		if _, err := ZINC_INDEX_ALIAS_LIST.removeIndexLocked(name); err != nil {
++			if restoreErr := metadata.Index.Set(name, indexData); restoreErr != nil {
++				log.Error().
++					Err(restoreErr).
++					Str("index", name).
++					Msg("failed to restore index metadata after alias persistence failure; manual recovery required")
++				return fmt.Errorf("delete index[%s] failed: alias metadata error: %w; metadata restore error: %s", name, err, restoreErr.Error())
++			}
++			return fmt.Errorf("failed to detach index[%s] from aliases, deletion rolled back: %w", name, err)
++		}
++
++		// 3. close and evict the cached index; it is no longer searchable in
++		// this process, and concurrent alias adds can no longer target it
++		ZINC_INDEX_LIST.Delete(name)
+ 
+-	// 3. Physically delete the index
+-	dataPath := config.Global.DataPath
+-	err := os.RemoveAll(dataPath + "/" + index.GetName())
++		dataPath = indexDataPath(index.GetName())
++		return nil
++	})
+ 	if err != nil {
+-		log.Error().Err(err).Msg("failed to delete index")
++		return err
++	}
++
++	// 4. physical removal happens after the commit, outside the alias lock so
++	// large directories never block alias searches
++	if err := removeIndexDirectory(dataPath); err != nil {
++		log.Error().
++			Err(err).
++			Str("index", name).
++			Str("path", dataPath).
++			Msg("index deleted from metadata and cache but failed to remove data path; retry the deletion to clean it up")
++		return fmt.Errorf("index[%s] deleted but failed to remove data path[%s]: %w", name, dataPath, err)
++	}
++
++	return nil
++}
++
++// deleteOrphanedIndex handles DeleteIndex for a name that is not cached: if
++// the index metadata is gone as well but its data directory remains, the
++// deletion was committed before and only the physical cleanup failed, so
++// retry the cleanup; otherwise the index simply does not exist.
++func deleteOrphanedIndex(name string) error {
++	dataPath := indexDataPath(name)
++	if _, statErr := os.Stat(dataPath); statErr != nil {
++		return errors.New("index " + name + " does not exists")
++	}
++
++	if _, err := metadata.Index.Get(name); !errors.Is(err, zincErrors.ErrKeyNotFound) {
++		// metadata still (unexpectedly) references the index; do not touch it
++		return errors.New("index " + name + " does not exists")
++	}
++
++	if err := removeIndexDirectory(dataPath); err != nil {
++		return fmt.Errorf("failed to remove leftover data path[%s] of deleted index[%s]: %w", dataPath, name, err)
+ 	}
+ 
+-	// 4. Delete form metadata
+-	return metadata.Index.Delete(name)
++	log.Info().Str("index", name).Str("path", dataPath).Msg("cleaned leftover data path of deleted index")
++	return nil
+ }
+diff --git a/pkg/core/deleteindex_test.go b/pkg/core/deleteindex_test.go
+index a173054..a3eb9a9 100644
+--- a/pkg/core/deleteindex_test.go
++++ b/pkg/core/deleteindex_test.go
+@@ -16,11 +16,27 @@
+ package core
+ 
+ import (
++	"errors"
++	"os"
++	"path/filepath"
++	"sync"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/zincsearch/zincsearch/pkg/metadata"
++	zincErrors "github.com/zincsearch/zincsearch/pkg/errors"
+ )
+ 
++func storeTestIndex(t *testing.T, name string) {
++	t.Helper()
++	index, err := NewIndex(name, "disk", 1)
++	require.NoError(t, err)
++	require.NotNil(t, index)
++	require.NoError(t, StoreIndex(index))
++}
++
+ func TestDeleteIndex(t *testing.T) {
+ 	indexName := "TestDeleteIndex.index_1"
+ 	type args struct {
+@@ -63,3 +79,246 @@ func TestDeleteIndex(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// deleting an index must remove it from aliases both in the running process
++// and in the persisted metadata, so after a restart alias search can never
++// point at the deleted target again.
++func TestDeleteIndex_CleansAliasFromMemoryAndMetadata(t *testing.T) {
++	keep := "TestDeleteIndex_Alias.keep"
++	gone := "TestDeleteIndex_Alias.gone"
++	aliasName := "TestDeleteIndex_Alias.daily"
++
++	storeTestIndex(t, keep)
++	storeTestIndex(t, gone)
++	t.Cleanup(func() { _ = DeleteIndex(keep) })
++
++	require.NoError(t, ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{keep, gone}))
++
++	require.NoError(t, DeleteIndex(gone))
++
++	// current process: the alias only resolves to the surviving index
++	indexes, ok := ZINC_INDEX_ALIAS_LIST.GetIndexesForAlias(aliasName)
++	require.True(t, ok)
++	require.Equal(t, []string{keep}, indexes)
++
++	// persisted metadata (what a restart would load) says the same
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Equal(t, []string{keep}, stored[aliasName])
++
++	// cache, index metadata and physical directory are all gone
++	_, exists := GetIndex(gone)
++	require.False(t, exists)
++
++	_, err = metadata.Index.Get(gone)
++	require.ErrorIs(t, err, zincErrors.ErrKeyNotFound)
++
++	_, err = os.Stat(indexDataPath(gone))
++	require.True(t, os.IsNotExist(err))
++}
++
++// if deleting the index metadata fails, nothing is published: the index
++// stays cached, its alias membership stays visible and persisted, and the
++// same request retries successfully.
++func TestDeleteIndex_RollbackWhenIndexMetadataDeleteFails(t *testing.T) {
++	mem := withMemMetadata(t)
++	name := "TestDeleteIndex_MetaFail.name"
++	aliasName := "TestDeleteIndex_MetaFail.daily"
++
++	storeTestIndex(t, name)
++	require.NoError(t, ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{name}))
++
++	mem.FailDelete = func(key string) error {
++		if key == "/index/"+name {
++			return errors.New("metadata delete failed")
++		}
++		return nil
++	}
++
++	err := DeleteIndex(name)
++	require.Error(t, err)
++
++	_, ok := GetIndex(name)
++	require.True(t, ok, "index must stay cached after failed metadata deletion")
++
++	data, err := metadata.Index.Get(name)
++	require.NoError(t, err)
++	require.NotEmpty(t, data, "index metadata must still exist after failed deletion")
++
++	require.Contains(t, ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(name), aliasName)
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Contains(t, stored[aliasName], name)
++
++	// retry the original request after recovery
++	mem.FailDelete = nil
++	require.NoError(t, DeleteIndex(name))
++
++	_, ok = GetIndex(name)
++	require.False(t, ok)
++	_, err = metadata.Index.Get(name)
++	require.Error(t, err, "index metadata must be gone after successful retry")
++	_, ok = ZINC_INDEX_ALIAS_LIST.GetIndexesForAlias(aliasName)
++	require.False(t, ok)
++}
++
++// if persisting the detached aliases fails after the index metadata was
++// deleted, the index metadata is restored as a compensating action and the
++// deletion can be retried as-is.
++func TestDeleteIndex_RestoresMetadataWhenAliasPersistFails(t *testing.T) {
++	mem := withMemMetadata(t)
++	name := "TestDeleteIndex_AliasPersistFail.name"
++	aliasName := "TestDeleteIndex_AliasPersistFail.daily"
++
++	storeTestIndex(t, name)
++	require.NoError(t, ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{name}))
++
++	mem.FailSet = func(key string) error {
++		if key == "/aliases/alias" {
++			return errors.New("alias metadata write failed")
++		}
++		return nil
++	}
++
++	err := DeleteIndex(name)
++	require.Error(t, err)
++
++	// compensating restore brought the index metadata back
++	data, err := metadata.Index.Get(name)
++	require.NoError(t, err)
++	require.NotEmpty(t, data)
++
++	// cache and alias membership stay visible
++	_, ok := GetIndex(name)
++	require.True(t, ok)
++	require.Contains(t, ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(name), aliasName)
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.Contains(t, stored[aliasName], name)
++
++	// retry the original request after recovery
++	mem.FailSet = nil
++	require.NoError(t, DeleteIndex(name))
++
++	_, ok = GetIndex(name)
++	require.False(t, ok)
++	_, err = metadata.Index.Get(name)
++	require.Error(t, err, "index metadata must be gone after successful retry")
++	_, ok = ZINC_INDEX_ALIAS_LIST.GetIndexesForAlias(aliasName)
++	require.False(t, ok)
++}
++
++// when physical directory removal fails after the deletion was committed,
++// the concrete error is returned while metadata/cache/aliases already agree
++// the index is gone; retrying the deletion cleans the leftover directory.
++func TestDeleteIndex_PhysicalFailureLeavesRecoverableState(t *testing.T) {
++	name := "TestDeleteIndex_PhysFail.name"
++	aliasName := "TestDeleteIndex_PhysFail.daily"
++
++	storeTestIndex(t, name)
++	require.NoError(t, ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{name}))
++
++	dir := indexDataPath(name)
++	require.NoError(t, os.MkdirAll(dir, 0o755))
++	require.NoError(t, os.WriteFile(filepath.Join(dir, "segment.lock"), []byte("locked"), 0o644))
++
++	origRemoveAll := removeAll
++	removeAll = func(string) error { return errors.New("device busy") }
++	err := DeleteIndex(name)
++	removeAll = origRemoveAll
++	require.Error(t, err)
++	require.Contains(t, err.Error(), name)
++
++	// logical state is committed: no layer can reach the deleted index
++	_, ok := GetIndex(name)
++	require.False(t, ok)
++	_, err = metadata.Index.Get(name)
++	require.ErrorIs(t, err, zincErrors.ErrKeyNotFound)
++	require.Empty(t, ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(name))
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.NotContains(t, stored, aliasName)
++
++	// only the physical leftovers remain
++	_, err = os.Stat(dir)
++	require.NoError(t, err, "data directory should still be present")
++
++	// retry performs the idempotent cleanup
++	require.NoError(t, DeleteIndex(name))
++	_, err = os.Stat(dir)
++	require.True(t, os.IsNotExist(err))
++}
++
++// concurrent alias updates and an index deletion must serialize into one
++// committed target set: no lost updates, no duplicates, and the deleted
++// index can never remain an alias target.
++func TestDeleteIndex_ConcurrentAliasChanges(t *testing.T) {
++	victim := "TestDeleteIndex_Concurrent.victim"
++	aliasName := "TestDeleteIndex_Concurrent.daily"
++	const n = 20
++
++	survivors := make([]string, 0, n)
++	for i := 0; i < n; i++ {
++		survivor := "TestDeleteIndex_Concurrent.surv_" + string(rune('a'+i))
++		storeTestIndex(t, survivor)
++		survivors = append(survivors, survivor)
++	}
++	t.Cleanup(func() {
++		for _, survivor := range survivors {
++			_ = DeleteIndex(survivor)
++		}
++	})
++	storeTestIndex(t, victim)
++	require.NoError(t, ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{victim}))
++
++	var wg sync.WaitGroup
++	for i, survivor := range survivors {
++		wg.Add(1)
++		go func(i int, survivor string) {
++			defer wg.Done()
++			if i%2 == 0 {
++				_ = ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(aliasName, []string{survivor})
++			} else {
++				_ = ZINC_INDEX_ALIAS_LIST.ApplyMembers(map[string][]string{aliasName: {survivor}}, nil)
++			}
++		}(i, survivor)
++	}
++
++	// an add racing the deletion either precedes it (then gets detached) or
++	// is skipped because the index already left the cache - either order
++	// converges to a set without the victim
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		_ = ZINC_INDEX_ALIAS_LIST.ApplyMembers(map[string][]string{aliasName: {victim}}, nil)
++	}()
++
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		_ = DeleteIndex(victim)
++	}()
++
++	wg.Wait()
++
++	indexes, ok := ZINC_INDEX_ALIAS_LIST.GetIndexesForAlias(aliasName)
++	require.True(t, ok)
++	require.Len(t, indexes, n)
++
++	committed := make(map[string]struct{}, n)
++	for _, index := range indexes {
++		require.NotEqual(t, victim, index, "deleted index must never remain an alias target")
++		committed[index] = struct{}{}
++	}
++	require.Len(t, committed, n, "committed target set must contain every survivor exactly once")
++
++	// memory and persisted metadata agree on the committed set
++	stored, err := metadata.Alias.Get()
++	require.NoError(t, err)
++	require.ElementsMatch(t, indexes, stored[aliasName])
++
++	_, exists := GetIndex(victim)
++	require.False(t, exists)
++	_, err = metadata.Index.Get(victim)
++	require.ErrorIs(t, err, zincErrors.ErrKeyNotFound)
++}
+diff --git a/pkg/core/index_shards.go b/pkg/core/index_shards.go
+index d5ddf5f..05b9c60 100644
+--- a/pkg/core/index_shards.go
++++ b/pkg/core/index_shards.go
+@@ -48,6 +48,7 @@ const (
+ // First layer shard just used for distribute not really store documents.
+ type IndexShard struct {
+ 	open   uint64
++	closed uint32 // set to 1 by Close so writers can never be reopened
+ 	name   string // shard name: index/shardID
+ 	root   *Index
+ 	ref    *meta.IndexShard
+@@ -57,6 +58,11 @@ type IndexShard struct {
+ 	close  chan struct{}
+ }
+ 
++// errIndexShardClosed is returned when an operation tries to (re)open a
++// writer after the shard has been closed, e.g. a search or the WAL consumer
++// racing index deletion.
++var errIndexShardClosed = errors.New(errors.ErrorTypeRuntimeException, "index shard is closed")
++
+ // IndexSecondShard second layer shard by auto increate shards for index.
+ // Under first layer shards, Documents will store in this layer shards.
+ // Use a environment `config.ZINC_SHARD_MAX_SIZE` to control second layer shard max size.
+@@ -151,6 +157,13 @@ func (s *IndexShard) NewShard() error {
+ 
+ // GetWriter return the newest shard writer or special shard writer
+ func (s *IndexShard) GetWriter(shardID ...int64) (*riot.Writer, error) {
++	// a closed shard must never reopen writers; otherwise a search or the
++	// WAL consumer racing index deletion could re-lock bluge.pid after the
++	// shard was closed and leak a writer into a deleted data directory
++	if atomic.LoadUint32(&s.closed) == 1 {
++		return nil, errIndexShardClosed
++	}
++
+ 	var id int64
+ 	if len(shardID) == 1 {
+ 		id = shardID[0]
+@@ -257,6 +270,11 @@ func (s *IndexShard) openWriter(shardID int64) error {
+ 	if secondShard.writer != nil {
+ 		return nil
+ 	}
++	// re-check under the writer lock: Close may have raced us and be
++	// closing the shard right now; never hand out a fresh writer afterwards
++	if atomic.LoadUint32(&s.closed) == 1 {
++		return errIndexShardClosed
++	}
+ 	var err error
+ 	indexName := fmt.Sprintf("%s/%s/%06x", s.GetIndexName(), s.GetID(), shardID)
+ 	secondShard.writer, err = OpenIndexWriter(indexName, s.root.GetStorageType(), defaultSearchAnalyzer, 0, 0)
+@@ -265,22 +283,33 @@ func (s *IndexShard) openWriter(shardID int64) error {
+ 
+ func (s *IndexShard) Close() error {
+ 	if atomic.LoadUint64(&s.open) == 0 {
++		// a shard that never finished opening must not allow writers to be
++		// (re)opened after deletion either
++		atomic.StoreUint32(&s.closed, 1)
+ 		return nil
+ 	}
+ 
++	// mark closed first, so a WAL consumer or search already past other
++	// checks cannot (re)open a writer while we are shutting this shard down
++	atomic.StoreUint32(&s.closed, 1)
++
+ 	s.close <- struct{}{}
+ 	atomic.StoreUint64(&s.open, 0)
+ 
+ 	s.lock.Lock()
+ 	defer s.lock.Unlock()
+ 	for _, secondShard := range s.shards {
++		secondShard.lock.Lock()
+ 		if secondShard.writer == nil {
++			secondShard.lock.Unlock()
+ 			continue
+ 		}
+ 		if err := secondShard.writer.Close(); err != nil {
++			secondShard.lock.Unlock()
+ 			return err
+ 		}
+ 		secondShard.writer = nil
++		secondShard.lock.Unlock()
+ 	}
+ 
+ 	if err := s.wal.Close(); err != nil {
+diff --git a/pkg/core/indexlist.go b/pkg/core/indexlist.go
+index 5cfa7a4..f74b1ef 100644
+--- a/pkg/core/indexlist.go
++++ b/pkg/core/indexlist.go
+@@ -62,6 +62,13 @@ func init() {
+ 	if err != nil {
+ 		log.Fatal().Err(err).Msg("Error loading alias")
+ 	}
++
++	// Drop alias members that point to indexes which failed to load or were
++	// left behind by an older version / interrupted deletion. After startup
++	// an alias must only describe indexes that are actually searchable.
++	if err := ZINC_INDEX_ALIAS_LIST.PruneInvalidAliases(); err != nil {
++		log.Error().Err(err).Msg("Error pruning invalid aliases")
++	}
+ }
+ 
+ func (t *IndexList) Add(index *Index) {
+diff --git a/pkg/handlers/index/alias_es.go b/pkg/handlers/index/alias_es.go
+index 894bd06..d0e2a94 100644
+--- a/pkg/handlers/index/alias_es.go
++++ b/pkg/handlers/index/alias_es.go
+@@ -51,6 +51,7 @@ type base struct {
+ // @Produce json
+ // @Success 200 {object} map[string]interface{}
+ // @Failure 400 {object} meta.HTTPResponseError
++// @Failure 500 {object} meta.HTTPResponseError
+ // @Router /es/_aliases [post]
+ func AddOrRemoveESAlias(c *gin.Context) {
+ 	var alias Alias
+@@ -93,12 +94,13 @@ func AddOrRemoveESAlias(c *gin.Context) {
+ 		}
+ 	}
+ 
+-	for alias, indexes := range addMap {
+-		_ = core.ZINC_INDEX_ALIAS_LIST.AddIndexesToAlias(alias, indexes)
+-	}
+-
+-	for alias, indexes := range removeMap {
+-		_ = core.ZINC_INDEX_ALIAS_LIST.RemoveIndexesFromAlias(alias, indexes)
++	// Apply all adds and removes as one committed transaction. If the alias
++	// metadata cannot be persisted, the previous alias state stays visible
++	// and the same request can be retried; surface the failure instead of
++	// acknowledging a change that may not have been committed.
++	if err := core.ZINC_INDEX_ALIAS_LIST.ApplyMembers(addMap, removeMap); err != nil {
++		zutils.GinRenderJSON(c, http.StatusInternalServerError, meta.HTTPResponseError{Error: err.Error()})
++		return
+ 	}
+ 
+ 	zutils.GinRenderJSON(c, http.StatusOK, gin.H{"acknowledged": true})
+diff --git a/pkg/handlers/index/alias_es_test.go b/pkg/handlers/index/alias_es_test.go
+index e8d5f91..57e080d 100644
+--- a/pkg/handlers/index/alias_es_test.go
++++ b/pkg/handlers/index/alias_es_test.go
+@@ -16,13 +16,16 @@
+ package index
+ 
+ import (
++	"errors"
+ 	"net/http"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/zincsearch/zincsearch/pkg/core"
++	"github.com/zincsearch/zincsearch/pkg/meta"
+ 	"github.com/zincsearch/zincsearch/pkg/metadata"
++	"github.com/zincsearch/zincsearch/pkg/zutils/json"
+ 	"github.com/zincsearch/zincsearch/test/utils"
+ )
+ 
+@@ -273,6 +276,45 @@ func TestGetESAliases(t *testing.T) {
+ 	}
+ }
+ 
++// a persistence failure must surface as an error, leave the previously
++// visible alias state untouched, and allow the same request to be retried.
++func TestAddOrRemoveESAlias_PersistFailureRollbackAndRetry(t *testing.T) {
++	indexName := "TestAddOrRemoveESAlias.rollback"
++	index, closeFn := newIndex(t, indexName)
++	defer closeFn()
++	require.Equal(t, indexName, index.GetName())
++
++	body := `{"actions": [{"add": {"index": "` + indexName + `","alias": "rollback_alias_1"}}]}`
++
++	// metadata backend refuses writes
++	mem := utils.NewMemStorage()
++	prev := metadata.SetDB(mem)
++	mem.FailSet = func(string) error { return errors.New("metadata unavailable") }
++
++	c, w := utils.NewGinContext()
++	utils.SetGinRequestData(c, body)
++	AddOrRemoveESAlias(c)
++
++	require.Equal(t, http.StatusInternalServerError, w.Code)
++	var errResp meta.HTTPResponseError
++	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
++	require.Contains(t, errResp.Error, "metadata unavailable")
++	require.Empty(t, core.ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(indexName))
++
++	// recover storage and retry the very same request
++	mem.FailSet = nil
++	metadata.SetDB(prev)
++
++	c2, w2 := utils.NewGinContext()
++	utils.SetGinRequestData(c2, body)
++	AddOrRemoveESAlias(c2)
++
++	require.Equal(t, http.StatusOK, w2.Code)
++	require.Equal(t, `{"acknowledged":true}`, w2.Body.String())
++	require.ElementsMatch(t, []string{"rollback_alias_1"},
++		core.ZINC_INDEX_ALIAS_LIST.GetAliasesForIndex(indexName))
++}
++
+ func newIndex(t *testing.T, indexName string) (*core.Index, func()) {
+ 	index, err := core.NewIndex(indexName, "disk", 2)
+ 	require.NoError(t, err)
+diff --git a/pkg/metadata/storage.go b/pkg/metadata/storage.go
+index 766f95d..81e765e 100644
+--- a/pkg/metadata/storage.go
++++ b/pkg/metadata/storage.go
+@@ -46,3 +46,12 @@ func init() {
+ func Close() error {
+ 	return db.Close()
+ }
++
++// SetDB replaces the metadata storage backend and returns the previous one.
++// It exists so tests can inject storage failures; production code must not
++// call it.
++func SetDB(storage storage.Storager) storage.Storager {
++	prev := db
++	db = storage
++	return prev
++}
+diff --git a/test/utils/metadata.go b/test/utils/metadata.go
+new file mode 100644
+index 0000000..b2bedda
+--- /dev/null
++++ b/test/utils/metadata.go
+@@ -0,0 +1,117 @@
++/* Copyright 2022 Zinc Labs Inc. and Contributors
++*
++* Licensed under the Apache License, Version 2.0 (the "License");
++* you may not use this file except in compliance with the License.
++* You may obtain a copy of the License at
++*
++*     http://www.apache.org/licenses/LICENSE-2.0
++*
++* Unless required by applicable law or agreed to in writing, software
++* distributed under the License is distributed on an "AS IS" BASIS,
++* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++* See the License for the specific language governing permissions and
++* limitations under the License.
++ */
++
++package utils
++
++import (
++	"errors"
++	"strings"
++	"sync"
++
++	"github.com/zincsearch/zincsearch/pkg/metadata/storage"
++)
++
++// Sentinel errors mirror pkg/errors (same messages); the fake storage must
++// not import pkg/errors because pkg/errors tests import this package.
++var (
++	ErrMemKeyEmpty    = errors.New("key is be empty")
++	ErrMemKeyNotFound = errors.New("key not found")
++)
++
++// MemStorage is an in-memory storage.Storager used to inject metadata
++// failures in tests. List emulates bbolt bucket semantics: keys are split at
++// their last "/" and List(prefix) only returns values stored directly in the
++// prefix bucket (nested buckets are excluded), matching the bolt backend.
++type MemStorage struct {
++	mu         sync.Mutex
++	data       map[string][]byte
++	FailSet    func(key string) error
++	FailDelete func(key string) error
++}
++
++func NewMemStorage() *MemStorage {
++	return &MemStorage{data: make(map[string][]byte)}
++}
++
++var _ storage.Storager = (*MemStorage)(nil)
++
++func (s *MemStorage) Set(key string, value []byte) error {
++	if key == "" {
++		return errors.ErrKeyEmpty
++	}
++	if s.FailSet != nil {
++		if err := s.FailSet(key); err != nil {
++			return err
++		}
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	buf := make([]byte, len(value))
++	copy(buf, value)
++	s.data[key] = buf
++	return nil
++}
++
++func (s *MemStorage) Get(key string) ([]byte, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	v, ok := s.data[key]
++	if !ok {
++		return nil, errors.ErrKeyNotFound
++	}
++	out := make([]byte, len(v))
++	copy(out, v)
++	return out, nil
++}
++
++func (s *MemStorage) Delete(key string) error {
++	if key == "" {
++		return errors.ErrKeyEmpty
++	}
++	if s.FailDelete != nil {
++		if err := s.FailDelete(key); err != nil {
++			return err
++		}
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	delete(s.data, key)
++	return nil
++}
++
++func (s *MemStorage) List(prefix string, _, _ int) ([][]byte, error) {
++	// bbolt resolves the bucket as the part of the key before the last "/",
++	// so values nested in deeper buckets are excluded (e.g. templates).
++	bucket := prefix
++	if i := strings.LastIndex(prefix, "/"); i >= 0 {
++		bucket = prefix[:i]
++	}
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	out := make([][]byte, 0)
++	for k, v := range s.data {
++		i := strings.LastIndex(k, "/")
++		if i < 0 || k[:i] != bucket {
++			continue
++		}
++		buf := make([]byte, len(v))
++		copy(buf, v)
++		out = append(out, buf)
++	}
++	return out, nil
++}
++
++func (s *MemStorage) Close() error { return nil }

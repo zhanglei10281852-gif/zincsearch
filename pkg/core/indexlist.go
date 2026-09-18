@@ -62,6 +62,13 @@ func init() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Error loading alias")
 	}
+
+	// Drop alias members that point to indexes which failed to load or were
+	// left behind by an older version / interrupted deletion. After startup
+	// an alias must only describe indexes that are actually searchable.
+	if err := ZINC_INDEX_ALIAS_LIST.PruneInvalidAliases(); err != nil {
+		log.Error().Err(err).Msg("Error pruning invalid aliases")
+	}
 }
 
 func (t *IndexList) Add(index *Index) {
