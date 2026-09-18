@@ -56,7 +56,7 @@ type Query struct {
 	MultiMatch        *MultiMatchQuery                   `json:"multi_match,omitempty"`         // .
 	MatchAll          *MatchAllQuery                     `json:"match_all,omitempty"`           // just set or null
 	MatchNone         *MatchNoneQuery                    `json:"match_none,omitempty"`          // just set or null
-	CombinedFields    *CombinedFieldsQuery               `json:"combined_fields,omitempty"`     // TODO: not implemented
+	CombinedFields    *CombinedFieldsQuery               `json:"combined_fields,omitempty"`     // .
 	QueryString       *QueryStringQuery                  `json:"query_string,omitempty"`        // .
 	SimpleQueryString *SimpleQueryStringQuery            `json:"simple_query_string,omitempty"` // .
 	Exists            *ExistsQuery                       `json:"exists,omitempty"`              // .
@@ -161,11 +161,12 @@ type MultiMatchQuery struct {
 }
 
 type CombinedFieldsQuery struct {
-	Query              string   `json:"query,omitempty"`
-	Analyzer           string   `json:"analyzer,omitempty"`
-	Fields             []string `json:"fields,omitempty"`
-	Operator           string   `json:"operator,omitempty"` // or(default), and
-	MinimumShouldMatch float64  `json:"minimum_should_match,omitempty"`
+	Query              string      `json:"query,omitempty"`
+	Analyzer           string      `json:"analyzer,omitempty"`
+	Fields             []string    `json:"fields,omitempty"`
+	Operator           string      `json:"operator,omitempty"` // or(default), and
+	MinimumShouldMatch interface{} `json:"minimum_should_match,omitempty"`
+	Boost              float64     `json:"boost,omitempty"`
 }
 
 type QueryStringQuery struct {

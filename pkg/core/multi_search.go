@@ -23,7 +23,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/vcaesar/riot"
-	"github.com/vcaesar/riot/analysis"
 
 	zincsearch "github.com/zincsearch/zincsearch/pkg/bluge/search"
 	"github.com/zincsearch/zincsearch/pkg/meta"
@@ -32,12 +31,14 @@ import (
 )
 
 func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchResponse, error) {
-	var mappings *meta.Mappings
-	var analyzers map[string]*analysis.Analyzer
-	var readers []*riot.Reader
-	var shardNum int64
-
 	timeMin, timeMax := timerange.Query(query.Query)
+
+	// resolve the target indexes first, validating the query against every
+	// index's own mappings before any reader is opened. Queries like
+	// combined_fields require compatible text fields/analyzers, so an
+	// incompatible index rejects the whole request instead of contaminating
+	// the merged result.
+	matchedIndexes := make([]*Index, 0)
 	isMatched := false
 	hasIndex := false
 	for _, index := range ZINC_INDEX_LIST.List() {
@@ -54,23 +55,48 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
 			}
 		}
 
+		if _, err := uquery.ParseQueryDSL(query, index.GetMappings(), index.GetAnalyzers()); err != nil {
+			return nil, err
+		}
+		matchedIndexes = append(matchedIndexes, index)
+	}
+
+	if len(matchedIndexes) == 0 {
+		if !hasIndex {
+			return nil, fmt.Errorf("core.MultiSearchV2: error accessing reader: no index found")
+		}
+		return &meta.SearchResponse{}, nil
+	}
+
+	// open readers grouped by index: each group keeps the mappings/analyzers of
+	// its index, so the query is rebuilt per index on top of identical shard
+	// mappings instead of one mappings object for unrelated readers
+	groups := make([]*zincsearch.ReaderGroup, 0, len(matchedIndexes))
+	readers := make([]*riot.Reader, 0)
+	var shardNum int64
+	var mappings *meta.Mappings
+	for _, index := range matchedIndexes {
 		reader, err := index.GetReaders(timeMin, timeMax)
 		if err != nil {
+			for _, r := range readers {
+				r.Close()
+			}
 			return nil, err
 		}
 		readers = append(readers, reader...)
 		shardNum += index.GetShardNum()
 		if mappings == nil {
+			// first index mappings are only used to format the shared response
 			mappings = index.GetMappings()
-			analyzers = index.GetAnalyzers()
 		}
-
+		groups = append(groups, &zincsearch.ReaderGroup{
+			Readers:   reader,
+			Mappings:  index.GetMappings(),
+			Analyzers: index.GetAnalyzers(),
+		})
 	}
 
 	if len(readers) == 0 {
-		if !hasIndex {
-			return nil, fmt.Errorf("core.MultiSearchV2: error accessing reader: no index found")
-		}
 		return &meta.SearchResponse{}, nil
 	}
 
@@ -80,11 +106,6 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
 		}
 	}()
 
-	_, err := uquery.ParseQueryDSL(query, mappings, analyzers)
-	if err != nil {
-		return nil, err
-	}
-
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if query.Timeout > 0 {
@@ -93,7 +114,7 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
 	}
 
 	// dmi, err := riot.MultiSearch(ctx, searchRequest, readers...)
-	dmi, err := zincsearch.MultiSearch(ctx, query, mappings, analyzers, readers...)
+	dmi, err := zincsearch.MultiSearchGroups(ctx, query, groups...)
 	if err != nil {
 		log.Printf("core.MultiSearchV2: error executing search: %s", err.Error())
 		if err == context.DeadlineExceeded {

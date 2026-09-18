@@ -31,6 +31,23 @@ import (
 	"github.com/zincsearch/zincsearch/pkg/uquery"
 )
 
+// ReaderGroup binds a set of readers (shards of one index) to the mappings
+// and analyzers of that index. Cross-index searches pass one group per index so
+// the query DSL is parsed and validated against each index's own mappings
+// instead of a single mappings object, which keeps field types, analyzers and
+// missing-field semantics deterministic when readers are merged.
+type ReaderGroup struct {
+	Readers   []*riot.Reader
+	Mappings  *meta.Mappings
+	Analyzers map[string]*analysis.Analyzer
+}
+
+type readerContext struct {
+	reader    *riot.Reader
+	mappings  *meta.Mappings
+	analyzers map[string]*analysis.Analyzer
+}
+
 func MultiSearch(
 	ctx context.Context,
 	query *meta.ZincQuery,
@@ -38,7 +55,33 @@ func MultiSearch(
 	analyzers map[string]*analysis.Analyzer,
 	readers ...*riot.Reader,
 ) (search.DocumentMatchIterator, error) {
-	if len(readers) == 0 {
+	return MultiSearchGroups(ctx, query, &ReaderGroup{
+		Readers:   readers,
+		Mappings:  mappings,
+		Analyzers: analyzers,
+	})
+}
+
+func MultiSearchGroups(
+	ctx context.Context,
+	query *meta.ZincQuery,
+	groups ...*ReaderGroup,
+) (search.DocumentMatchIterator, error) {
+	contexts := make([]readerContext, 0)
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		for _, r := range group.Readers {
+			contexts = append(contexts, readerContext{
+				reader:    r,
+				mappings:  group.Mappings,
+				analyzers: group.Analyzers,
+			})
+		}
+	}
+
+	if len(contexts) == 0 {
 		return &DocumentList{
 			bucket: search.NewBucket("",
 				map[string]search.Aggregation{
@@ -47,12 +90,13 @@ func MultiSearch(
 			),
 		}, nil
 	}
-	if len(readers) == 1 {
-		req, err := uquery.ParseQueryDSL(query, mappings, analyzers)
+	if len(contexts) == 1 {
+		c := contexts[0]
+		req, err := uquery.ParseQueryDSL(query, c.mappings, c.analyzers)
 		if err != nil {
 			return nil, err
 		}
-		return readers[0].Search(ctx, req)
+		return c.reader.Search(ctx, req)
 	}
 
 	bucketAggs := make(map[string]search.Aggregation)
@@ -60,8 +104,8 @@ func MultiSearch(
 
 	eg := &errgroup.Group{}
 	eg.SetLimit(config.Global.Shard.GoroutineNum)
-	docs := make(chan *search.DocumentMatch, len(readers)*10)
-	aggs := make(chan *search.Bucket, len(readers))
+	docs := make(chan *search.DocumentMatch, len(contexts)*10)
+	aggs := make(chan *search.Bucket, len(contexts))
 
 	docList := &DocumentList{
 		bucket: search.NewBucket("", bucketAggs),
@@ -88,9 +132,12 @@ func MultiSearch(
 		return nil
 	})
 
-	for _, r := range readers {
-		r := r
-		req, err := uquery.ParseQueryDSL(query, mappings, analyzers)
+	for _, c := range contexts {
+		c := c
+		// parse the DSL against the mappings/analyzers that own this reader,
+		// so every shard of a compatible index builds the same query and
+		// fields missing in an index resolve against that index only
+		req, err := uquery.ParseQueryDSL(query, c.mappings, c.analyzers)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +148,7 @@ func MultiSearch(
 		}
 		eg.Go(func() error {
 			var n int64
-			dmi, err := r.Search(ctx, req)
+			dmi, err := c.reader.Search(ctx, req)
 			if err != nil {
 				return err
 			}

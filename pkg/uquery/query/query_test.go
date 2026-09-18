@@ -213,9 +213,8 @@ func TestParseFuzziness(t *testing.T) {
 
 func TestNotImplementedQueries(t *testing.T) {
 	tests := map[string]func(map[string]interface{}) (riot.Query, error){
-		"boosting":         BoostingQuery,
-		"combined_fields":  CombinedFieldsQuery,
-		"exists":           ExistsQuery,
+		"boosting":        BoostingQuery,
+		"exists":          ExistsQuery,
 		"terms_set":        TermsSetQuery,
 		"geo_bounding_box": GeoBoundingBoxQuery,
 		"geo_distance":     GeoDistanceQuery,

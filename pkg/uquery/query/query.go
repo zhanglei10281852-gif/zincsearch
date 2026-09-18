@@ -99,7 +99,7 @@ func Query(query interface{}, mappings *meta.Mappings, analyzers map[string]*ana
 				return nil, errors.New(errors.ErrorTypeXContentParseException, "[match_none] failed to parse field").Cause(err)
 			}
 		case "combined_fields":
-			if subq, err = CombinedFieldsQuery(v); err != nil {
+			if subq, err = CombinedFieldsQuery(v, mappings, analyzers); err != nil {
 				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] failed to parse field").Cause(err)
 			}
 		case "query_string":

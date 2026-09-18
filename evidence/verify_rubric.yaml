@@ -1,0 +1,22 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "在兼容的 text 或 keyword 字段集合上，combined_fields 能返回包含查询词的文档，并按同一 analyzer 产生稳定的 operator 语义。"
+  - id: 2
+    type: f2p
+    text: "operator 为 and 或 or 以及 minimum_should_match 的不同取值会分别影响命中结果，字段之间的词项不会被错误地当作独立查询合并。"
+  - id: 3
+    type: f2p
+    text: "单索引、多 shard reader 和兼容字段的跨索引查询保持一致的命中与响应结构，不因 reader 顺序产生不同结果。"
+  - id: 4
+    type: f2p
+    text: "缺少字段或字段类型不兼容的跨索引请求遵循确定的错误或空结果语义，兼容索引的查询仍可独立成功。"
+  - id: 5
+    type: f2p
+    text: "非法 operator、minimum_should_match、字段列表或 JSON 结构会返回稳定解析错误，并且不会污染随后一次有效查询。"
+  - id: 6
+    type: p2p
+    text: "已有 match、multi_match、bool 和 query_string 查询的字段 analyzer、错误状态、分页和响应格式保持固定版本兼容，并分别有回归证据。"
+  - id: 7
+    type: p2p
+    text: "服务重启后使用持久化 mapping 进行 combined_fields 查询时，字段兼容性、analyzer 选择、跨索引结果和错误行为与重启前一致。"

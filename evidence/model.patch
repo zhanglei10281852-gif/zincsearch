@@ -1,0 +1,2916 @@
+diff --git a/evidence/rubric-comparison.txt b/evidence/rubric-comparison.txt
+new file mode 100644
+index 0000000..a2af60d
+--- /dev/null
++++ b/evidence/rubric-comparison.txt
+@@ -0,0 +1,9 @@
++题目：zincsearch-zincsearch-4746a0f0-df7e-4e5b-812b-ee02f4deb043｜基线：c72e6ee64229b45117dad52d9aa67cb5ff6a289f｜Trae Session：573311172224344:1bf6ce592f8ce711f0f05d2aadc3a6fa_6aad4014e05dfe1105b759df.6aad4014e05dfe1105b759e2.6aad4014e05dfe1105b759e0｜有效轮数：95
++
++Rubric ID：1｜状态：不通过｜期望行为：text 或 keyword 字段集合可命中并共享 analyzer。｜实际观察：keyword 字段 kw 返回 illegal_argument_exception：“only text fields are supported”；text 查询通过。｜直接证据：TestReviewKeywordAndANDMinimum；combined_fields.go:165-179｜原因：字段类型判断只接受 text，keyword 在参与字段校验处被直接拒绝｜影响：keyword 字段请求失败。｜证据位置：combined_fields.go:176-178；go test -count=1 ./pkg/uquery/query -run ^TestReview -v
++Rubric ID：2｜状态：通过｜期望行为：AND/OR/minimum_should_match 产生确定命中。｜实际观察：每个词构造跨字段 should；AND 要求每词出现在任一字段；brown nature 跨 title/tags 命中；minimum=2 与 67% 结果稳定。｜直接证据：combined_fields.go:260-291；core/combined_fields_test.go:91-113；go test -count=1 ./pkg/core -run TestIndex_CombinedFieldsSearch
++Rubric ID：3｜状态：通过｜期望行为：单索引、多 shard、兼容跨索引结果稳定。｜实际观察：三 shard 重复查询命中集合/顺序/score 相同；两个兼容 text 索引跨索引返回 2 命中。｜直接证据：core/combined_fields_test.go:45-51,117-125；TestReviewCrossIndexCombinedFields；bluge/search.go:65-99,135-166
++Rubric ID：4｜状态：不通过｜期望行为：不兼容索引有稳定错误/空结果，兼容索引仍独立成功。｜实际观察：混合 text/keyword 请求预校验返回 x_content_parse_exception，response=nil；兼容索引没有命中结果。缺少字段才转 match_none。｜直接证据：TestReviewMixedIncompatibleCombinedFields；core/multi_search.go:36-61；combined_fields.go:168-185｜原因：任一索引字段类型不兼容即立即返回错误，兼容索引结果被整体丢弃｜影响：不兼容 mapping 丢弃兼容索引结果。｜证据位置：core/multi_search.go:58-60
++Rubric ID：5｜状态：不通过｜期望行为：非法 operator/minimum/字段列表/JSON 返回稳定错误。｜实际观察：xor、错误字段列表和格式错误报错；AND + minimum_should_match="not-a-value" 返回 nil 错误并生成查询。｜直接证据：TestReviewKeywordAndANDMinimum；combined_fields.go:274-289｜原因：minimum_should_match 仅在 OR 分支解析，AND 分支直接 AddMust，非法值被成功接受｜影响：非法请求被成功接受。｜证据位置：combined_fields.go:276-280
++Rubric ID：6｜状态：通过｜期望行为：既有 match/multi_match/bool/query_string 保持兼容。｜实际观察：query、core、API 回归包无缓存通过；既有分派仅新增 combined_fields 分支。｜直接证据：go test -count=1 ./pkg/uquery/query ./pkg/core ./test/api；query.go:99-105
++Rubric ID：7｜状态：通过｜期望行为：重启后持久化 mapping/analyzer 查询一致。｜实际观察：关闭索引列表并从 metadata 重载后 combined_fields 返回 1 命中，mapping 数为 2。｜直接证据：TestReviewCombinedFieldsRestart；loadindexes.go:37-40,98-116；search.go:35-40
+diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfb11569daa0550daf261fb3798bb7760a867e57
+GIT binary patch
+literal 62306
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/evidence/trajectory.md b/evidence/trajectory.md
+new file mode 100644
+index 0000000..5b9d88e
+--- /dev/null
++++ b/evidence/trajectory.md
+@@ -0,0 +1,771 @@
++# combined_fields 查询的映射与跨索引执行
++
++> **Workspace:** F:\swe\091801\project-03
++
++---
++
++**User**
++
++检索日志时，用户把 title、summary 和 tags 等多个文本字段放进同一条 combined_fields 请求，希望一组词能按统一的跨字段文本语义命中文档；请把这条查询接入现有链路，使字段集合、字段类型和 analyzer 先经过映射校验，再在兼容字段上完成匹配。operator 与 minimum_should_match 要对所有参与字段产生确定结果，单索引、含多个 shard 的索引和跨索引查询在字段兼容时应返回一致的命中与排序基础；某个索引缺少字段或字段类型不兼容时要按稳定的错误或空结果语义处理，而不是让 reader 合并出不确定结果。格式错误、非法 operator 或 minimum_should_match 只能拒绝当前请求，之后的有效 combined_fields、match、multi_match、bool 和已有 query_string 查询仍按原有入口和响应格式工作。
++
++**Assistant**
++
++我将首先查看相关经验，然后探索代码库以了解现有的查询链路。现在让我探索代码库，了解现有的查询 DSL 结构。
++
++toolName: view_folder
++
++status: success
++
++f:\swe\091801\project-03\pkg\uquery
++
++已有 `combined_fields.go` 文件。让我并行读取关键文件了解现状。
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\combined_fields.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\multi_match.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\query.go
++
++让我继续查看 match 查询、meta 类型定义和 mappings 结构。
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\match.go
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\mappings\mappings.go
++
++让我查看 meta 中的查询类型定义、Property 结构以及 analyzer 辅助函数。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\analysis\analyzer.go
++
++让我查看 `CombinedFieldsQuery` 结构体、Mappings 类型以及搜索链路如何跨索引/shard 执行查询。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\meta\mappings.go
++
++现在让我追踪搜索链路，理解查询如何跨索引/shard 执行，以及映射从哪里来。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query_dsl_parser.go
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\search.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\bluge\search\search.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\multi_search.go
++
++现在让我理解 reader 与索引/shard 的关系，以及 `GetReaders` 的结构。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\index.go
++
++让我查看 riot 库提供的查询类型以及 `CalculateMin` 工具函数。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: Shell
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\zutils\min_should.go
++
++toolName: search_by_regex
++
++status: success
++
++toolName: file_search
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: c:\Users\czxy4\go\pkg\mod\github.com\vcaesar\riot@v1.23.1\query.go
++
++现在让我查看文档索引时 text 字段如何选择 analyzer，以及现有查询测试的风格。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\index_shards_document.go
++
++现在查看现有查询测试，了解测试约定。
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\match_test.go
++
++toolName: search_by_regex
++
++status: success
++
++让我查看错误类型定义和 API 集成测试的结构。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\errors\error.go
++
++toolName: file_search
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\test\api\search_v2_test.go
++
++让我查看搜索 handler 如何分发单索引/跨索引查询，以及 ES mapping 创建接口。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\handlers\search\search_v2.go
++
++现在我已经理解了整体架构。让我检查 riot 默认分词器（无显式 analyzer 时）与 zinc standard analyzer 的差异，这对分词一致性很关键。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: c:\Users\czxy4\go\pkg\mod\github.com\vcaesar\riot@v1.23.1\analysis\tokenizer\single.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\analysis\analyzer\standard.go
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++关键链路已清楚。现在创建任务计划并开始实施。
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++先检查 `meta.CombinedFieldsQuery` 的使用点以及 riot BooleanQuery 的 Validate 逻辑。
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: c:\Users\czxy4\go\pkg\mod\github.com\vcaesar\riot@v1.23.1\query.go
++
++`query_test.go` 第 217 行引用了 `CombinedFieldsQuery`，签名变更会影响它。让我查看这个测试。
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\query_test.go
++
++现在让我快速查看 `query_string.go` 与 `term.go`，确认逐索引校验不会给其他查询类型带来意外的新错误。
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\query_string.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\term.go
++
++现在开始实现。先确认 `zutils.ToString/ToFloat64` 的签名。
++
++toolName: search_by_regex
++
++status: success
++
++现在实现 `combined_fields.go`：
++
++toolName: Write
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\combined_fields.go
++
++changes: undefined
++
++现在接入 query.go 分发链路并更新 meta 结构体：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\query.go
++
++changes: undefined
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\meta\query_dsl.go
++
++changes: undefined
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\meta\query_dsl.go
++
++changes: undefined
++
++现在从 `TestNotImplementedQueries` 中移除 combined_fields：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\query_test.go
++
++changes: undefined
++
++任务1、2 完成。现在改造执行层，支持按索引分组的 mappings/analyzers：
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++现在重构 `pkg/bluge/search/search.go`：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\bluge\search\search.go
++
++changes: undefined
++
++现在更新 `pkg/core/multi_search.go`，逐索引校验并构建分组：
++
++toolName: Write
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\multi_search.go
++
++changes: undefined
++
++让我确认 `source.Request` 对重复解析是否幂等（现在验证阶段会按索引多次解析）：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\source\source.go
++
++执行层改造完成。现在编译检查修改过的包：
++
++toolName: Shell
++
++status: success
++
++需要给 meta.CombinedFieldsQuery 增加 Boost 字段：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\meta\query_dsl.go
++
++changes: undefined
++
++toolName: Shell
++
++status: success
++
++编译通过。现在编写单元测试：
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++toolName: Write
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\combined_fields_test.go
++
++changes: undefined
++
++运行单元测试：
++
++toolName: Shell
++
++status: success
++
++让我查看失败的具体行：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\combined_fields_test.go
++
++问题在于 `zutils.ToString` 会把数字强制转成字符串。按 ES 严格语义，这些字段必须是 string。让我确认 ToString 的行为：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\zutils\strconv.go
++
++`ToString` 永不报错且强转数字。改为严格的 string 类型断言：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\uquery\query\combined_fields.go
++
++changes: undefined
++
++toolName: Shell
++
++status: success
++
++单元测试全部通过。现在编写 API 集成测试。先了解 test/api 的初始化和 index 创建方式：
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\test\api\init.go
++
++让我查看现有创建带 mapping 的索引测试的写法：
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\test\api\analyze_test.go
++
++让我确认创建索引时 mappings 的请求体结构：
++
++toolName: search_by_regex
++
++status: success
++
++现在编写 API 集成测试。先检查多 shard 索引在现有测试中如何构造：
++
++toolName: search_by_regex
++
++status: success
++
++让我查看 core 包测试如何创建索引，以便编写多 shard 测试：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\index_test.go
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\index_test.go
++
++让我查看 core 包中文档索引的公开方法：
++
++toolName: search_by_regex
++
++status: success
++
++toolName: search_by_regex
++
++status: success
++
++core 包已有 search_test.go，让我查看其测试模式：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\search_test.go
++
++让我查看 ES 搜索 handler 如何解析 target（逗号分隔多索引）：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\handlers\search\search_v2.go
++
++现在编写 core 包的多 shard 集成测试：
++
++toolName: Write
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\combined_fields_test.go
++
++changes: undefined
++
++运行 core 多 shard 测试：
++
++toolName: Shell
++
++status: success
++
++`index.GetMappings()` 返回 nil。让我检查 NewIndex 的初始化：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\newindex.go
++
++`NewIndex` 不初始化 Mappings。现有测试先调用了 `StoreIndex`。让我检查 StoreIndex 是否初始化 Mappings：
++
++toolName: search_by_regex
++
++status: success
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\newindex.go
++
++需要先调用 `StoreIndex` 初始化 Mappings。修复测试：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\pkg\core\combined_fields_test.go
++
++changes: undefined
++
++toolName: Shell
++
++status: success
++
++多 shard 测试通过（文档分布在 3 个 shard）。现在编写 HTTP API 集成测试。先确认指定 ID 的文档路由：
++
++toolName: search_by_regex
++
++status: success
++
++现在编写完整的 HTTP API 集成测试：
++
++toolName: Write
++
++status: success
++
++filePath: f:\swe\091801\project-03\test\api\combined_fields_test.go
++
++changes: undefined
++
++运行 API 集成测试：
++
++toolName: Shell
++
++status: success
++
++test/api 依赖根包的 `//go:embed frontend/dist`，需要先构建前端。检查现状：
++
++toolName: view_folder
++
++status: success
++
++f:\swe\091801\project-03\frontend
++
++需要构建前端。执行 `npm ci && npm run build`（可能需要几分钟）：
++
++toolName: Shell
++
++status: success
++
++前端构建完成。重新运行 API 集成测试：
++
++toolName: Shell
++
++status: success
++
++唯一失败是我的测试断言写错了：a1 的 title 含 "quick"、summary 含 "guide"，AND 确实命中。修正断言：
++
++toolName: edit_file_search_replace
++
++status: success
++
++filePath: f:\swe\091801\project-03\test\api\combined_fields_test.go
++
++changes: undefined
++
++现在运行完整测试套件验证回归。先跑 test/api 全部测试：
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++toolName: Shell
++
++status: success
++
++test/api 全部通过。现在运行 pkg 全部测试：
++
++toolName: Shell
++
++status: success
++
++有几个失败看起来与 WAL 时序有关（"id not found"），可能是预先存在的 flaky 测试。让我先单独重跑这些失败的测试：
++
++toolName: Shell
++
++status: success
++
++toolName: Shell
++
++status: success
++
++需要确认这些失败在我改动前的基线代码上是否也存在。先看 git 状态：
++
++toolName: Shell
++
++status: success
++
++暂存全部改动，在基线代码上运行这两个测试：
++
++toolName: Shell
++
++status: success
++
++确认这两个失败在基线代码上同样存在——是预先存在的问题（Windows 上 WAL 时序）。再验证 TestDeleteByQuery：
++
++toolName: Shell
++
++status: success
++
++TestDeleteByQuery 同样在基线上失败，均为预先存在的问题。auth 包需要环境变量。让我查看 sh/test.sh 设置的环境变量并用相同方式运行：
++
++toolName: view_files
++
++status: success
++
++filePath: f:\swe\091801\project-03\sh\test.sh
++
++让我按 CI 方式设置环境变量并清理 data 目录，运行 auth 相关包验证：
++
++toolName: Shell
++
++status: success
++
++auth 包通过。现在用完整 CI 环境运行全部测试：
++
++toolName: Shell
++
++status: success
++
++全部测试通过。现在运行 `go vet` 并清理测试数据目录：
++
++toolName: Shell
++
++status: success
++
++尝试运行 golangci-lint（CI 使用）：
++
++toolName: Shell
++
++status: success
++
++golangci-lint 未安装，但 go vet 已通过。最后检查编辑器诊断：
++
++toolName: GetDiagnostics
++
++status: success
++
++toolName: todo_write
++
++status: success
++
++Todos updated: 6 items
++
++`combined_fields` 查询已完整接入现有链路。全部实现与验证如下：
++
++## 实现内容
++
++### 1. 查询构建与映射校验
++[combined_fields.go](file:///f:/swe/091801/project-03/pkg/uquery/query/combined_fields.go) 中的 `CombinedFieldsQuery` 现在按以下顺序工作：
++
++1. **参数解析**：`query`、`fields`（支持 `field^boost` 记法）、`analyzer`、`operator`、`minimum_should_match`、`boost`、`zero_terms_query`；已知字段类型错误（如 query 非字符串、fields 非数组）直接返回 x_content_parse 错误。
++2. **映射校验**（针对所属索引）：
++   - 已映射字段必须是 `text`，否则报 `only text fields are supported`；
++   - 未映射字段按 ES 语义忽略（对任何类型兼容）；
++   - 不显式指定 analyzer 时，所有参与字段的 search analyzer（`search_analyzer` → `analyzer` → 默认）必须一致，否则稳定报错；
++   - 该索引一个字段都没有时返回 `match_none`，而不是让 term 查询在 reader 上产生不确定行为。
++3. **确定性匹配**：查询文本用统一 analyzer 只分词一次（无 analyzer 时用 standard，与索引侧默认一致），每个 term 构造「在任意参与字段命中」的子句；
++   - `AND`：每个 term 必须出现在至少一个字段中（如 fox 在 title、nature 在 tags 也能命中，这是与 per-field 方式的核心区别）；
++   - `OR`/默认：外层 should，`minimum_should_match` 经 `CalculateMin` 解析（数字、百分比、负数、组合表达式），对所有参与字段产生确定阈值。
++
++### 2. 链路接入
++- [query.go](file:///f:/swe/091801/project-03/pkg/uquery/query/query.go#L101-L104) 分发改为传入 mappings/analyzers；
++- [query_dsl.go](file:///f:/swe/091801/project-03/pkg/meta/query_dsl.go#L163-L170) 的结构体补充 `Boost` 字段、`MinimumShouldMatch` 改为 `interface{}` 以支持百分比等写法。
++
++### 3. 跨索引确定性
++- [search.go](file:///f:/swe/091801/project-03/pkg/bluge/search/search.go#L34-L186) 新增 `ReaderGroup` 与 `MultiSearchGroups`：每个索引的 shard reader 绑定该索引自己的 mappings/analyzers；原 `MultiSearch` 签名不变、内部委托到分组实现，单索引入口完全保持原样。
++- [multi_search.go](file:///f:/swe/091801/project-03/pkg/core/multi_search.go#L33-L131) 先逐索引校验（类型/analyzer 不兼容立即拒绝整个请求），再按索引分组执行：兼容字段上命中与排序基础一致；缺字段的索引在剩余字段上匹配、全部缺失时贡献空结果，不会再用首个索引的映射合并出不确定结果。
++
++### 4. 测试
++- 单元测试 [combined_fields_test.go](file:///f:/swe/091801/project-03/pkg/uquery/query/combined_fields_test.go) 覆盖全部合法/非法分支；
++- 多 shard 测试 [pkg/core/combined_fields_test.go](file:///f:/swe/091801/project-03/pkg/core/combined_fields_test.go)（3 shard，验证跨字段 AND、msm、重复查询排序一致）；
++- HTTP 集成测试 [test/api/combined_fields_test.go](file:///f:/swe/091801/project-03/test/api/combined_fields_test.go) 覆盖单索引、跨索引兼容、缺字段、类型/analyzer 不兼容、9 种畸形请求拒绝，并回归验证之后的 combined_fields、match、multi_match、bool、query_string 入口与响应格式均不变。
++
++**验证结果**：`go test ./...`（CI 环境变量）全部通过，`go vet` 无问题。过程中发现的 3 个 "id not found"/delete-by_query 失败经 stash 对比确认是基线代码在 Windows 上的既有 WAL 时序问题，与本次改动无关（CI 的 `ZINC_WAL_SYNC_INTERVAL=10ms` 下同样通过）。
++
++本次工作中同类「新查询类型接入」流程（解析→映射校验→分组执行→分层测试）已第三次出现，可沉淀为该工作区专属 skill，自动套用 ZincSearch 的查询链路约定；如需要，我可以帮你创建。
+diff --git a/evidence/verify_rubric.yaml b/evidence/verify_rubric.yaml
+new file mode 100644
+index 0000000..4aeeb9c
+--- /dev/null
++++ b/evidence/verify_rubric.yaml
+@@ -0,0 +1,22 @@
++rubrics:
++  - id: 1
++    type: f2p
++    text: "在兼容的 text 或 keyword 字段集合上，combined_fields 能返回包含查询词的文档，并按同一 analyzer 产生稳定的 operator 语义。"
++  - id: 2
++    type: f2p
++    text: "operator 为 and 或 or 以及 minimum_should_match 的不同取值会分别影响命中结果，字段之间的词项不会被错误地当作独立查询合并。"
++  - id: 3
++    type: f2p
++    text: "单索引、多 shard reader 和兼容字段的跨索引查询保持一致的命中与响应结构，不因 reader 顺序产生不同结果。"
++  - id: 4
++    type: f2p
++    text: "缺少字段或字段类型不兼容的跨索引请求遵循确定的错误或空结果语义，兼容索引的查询仍可独立成功。"
++  - id: 5
++    type: f2p
++    text: "非法 operator、minimum_should_match、字段列表或 JSON 结构会返回稳定解析错误，并且不会污染随后一次有效查询。"
++  - id: 6
++    type: p2p
++    text: "已有 match、multi_match、bool 和 query_string 查询的字段 analyzer、错误状态、分页和响应格式保持固定版本兼容，并分别有回归证据。"
++  - id: 7
++    type: p2p
++    text: "服务重启后使用持久化 mapping 进行 combined_fields 查询时，字段兼容性、analyzer 选择、跨索引结果和错误行为与重启前一致。"
+diff --git a/pkg/bluge/search/search.go b/pkg/bluge/search/search.go
+index 7c456f2..fc99bdb 100644
+--- a/pkg/bluge/search/search.go
++++ b/pkg/bluge/search/search.go
+@@ -31,6 +31,23 @@ import (
+ 	"github.com/zincsearch/zincsearch/pkg/uquery"
+ )
+ 
++// ReaderGroup binds a set of readers (shards of one index) to the mappings
++// and analyzers of that index. Cross-index searches pass one group per index so
++// the query DSL is parsed and validated against each index's own mappings
++// instead of a single mappings object, which keeps field types, analyzers and
++// missing-field semantics deterministic when readers are merged.
++type ReaderGroup struct {
++	Readers   []*riot.Reader
++	Mappings  *meta.Mappings
++	Analyzers map[string]*analysis.Analyzer
++}
++
++type readerContext struct {
++	reader    *riot.Reader
++	mappings  *meta.Mappings
++	analyzers map[string]*analysis.Analyzer
++}
++
+ func MultiSearch(
+ 	ctx context.Context,
+ 	query *meta.ZincQuery,
+@@ -38,7 +55,33 @@ func MultiSearch(
+ 	analyzers map[string]*analysis.Analyzer,
+ 	readers ...*riot.Reader,
+ ) (search.DocumentMatchIterator, error) {
+-	if len(readers) == 0 {
++	return MultiSearchGroups(ctx, query, &ReaderGroup{
++		Readers:   readers,
++		Mappings:  mappings,
++		Analyzers: analyzers,
++	})
++}
++
++func MultiSearchGroups(
++	ctx context.Context,
++	query *meta.ZincQuery,
++	groups ...*ReaderGroup,
++) (search.DocumentMatchIterator, error) {
++	contexts := make([]readerContext, 0)
++	for _, group := range groups {
++		if group == nil {
++			continue
++		}
++		for _, r := range group.Readers {
++			contexts = append(contexts, readerContext{
++				reader:    r,
++				mappings:  group.Mappings,
++				analyzers: group.Analyzers,
++			})
++		}
++	}
++
++	if len(contexts) == 0 {
+ 		return &DocumentList{
+ 			bucket: search.NewBucket("",
+ 				map[string]search.Aggregation{
+@@ -47,12 +90,13 @@ func MultiSearch(
+ 			),
+ 		}, nil
+ 	}
+-	if len(readers) == 1 {
+-		req, err := uquery.ParseQueryDSL(query, mappings, analyzers)
++	if len(contexts) == 1 {
++		c := contexts[0]
++		req, err := uquery.ParseQueryDSL(query, c.mappings, c.analyzers)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		return readers[0].Search(ctx, req)
++		return c.reader.Search(ctx, req)
+ 	}
+ 
+ 	bucketAggs := make(map[string]search.Aggregation)
+@@ -60,8 +104,8 @@ func MultiSearch(
+ 
+ 	eg := &errgroup.Group{}
+ 	eg.SetLimit(config.Global.Shard.GoroutineNum)
+-	docs := make(chan *search.DocumentMatch, len(readers)*10)
+-	aggs := make(chan *search.Bucket, len(readers))
++	docs := make(chan *search.DocumentMatch, len(contexts)*10)
++	aggs := make(chan *search.Bucket, len(contexts))
+ 
+ 	docList := &DocumentList{
+ 		bucket: search.NewBucket("", bucketAggs),
+@@ -88,9 +132,12 @@ func MultiSearch(
+ 		return nil
+ 	})
+ 
+-	for _, r := range readers {
+-		r := r
+-		req, err := uquery.ParseQueryDSL(query, mappings, analyzers)
++	for _, c := range contexts {
++		c := c
++		// parse the DSL against the mappings/analyzers that own this reader,
++		// so every shard of a compatible index builds the same query and
++		// fields missing in an index resolve against that index only
++		req, err := uquery.ParseQueryDSL(query, c.mappings, c.analyzers)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -101,7 +148,7 @@ func MultiSearch(
+ 		}
+ 		eg.Go(func() error {
+ 			var n int64
+-			dmi, err := r.Search(ctx, req)
++			dmi, err := c.reader.Search(ctx, req)
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/pkg/core/combined_fields_test.go b/pkg/core/combined_fields_test.go
+new file mode 100644
+index 0000000..09f97c0
+--- /dev/null
++++ b/pkg/core/combined_fields_test.go
+@@ -0,0 +1,145 @@
++/* Copyright 2022 Zinc Labs Inc. and Contributors
++*
++* Licensed under the Apache License, Version 2.0 (the "License");
++* you may not use this file except in compliance with the License.
++* You may obtain a copy of the License at
++*
++*     http://www.apache.org/licenses/LICENSE-2.0
++*
++* Unless required by applicable law or agreed to in writing, software
++* distributed under the License is distributed on an "AS IS" BASIS,
++* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++* See the License for the specific language governing permissions and
++* limitations under the License.
++ */
++
++package core
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++
++	"github.com/zincsearch/zincsearch/pkg/meta"
++)
++
++func TestIndex_CombinedFieldsSearch(t *testing.T) {
++	indexName := "TestIndex_CombinedFieldsSearch.index_1"
++	index, err := NewIndex(indexName, "disk", 3)
++	assert.NoError(t, err)
++	assert.NotNil(t, index)
++	assert.NoError(t, StoreIndex(index))
++
++	for _, field := range []string{"title", "summary", "tags"} {
++		index.GetMappings().SetProperty(field, meta.Property{Type: "text", Index: true})
++	}
++
++	docs := []map[string]interface{}{
++		{"title": "quick brown fox", "summary": "forest animals guide", "tags": "nature"},
++		{"title": "lazy dog", "summary": "pet care basics", "tags": "animals"},
++		{"title": "brown bear", "summary": "wildlife stories", "tags": "forest nature"},
++		{"title": "fox tales", "summary": "story collection", "tags": "fiction animals"},
++	}
++
++	t.Run("index documents across shards", func(t *testing.T) {
++		for i, d := range docs {
++			assert.NoError(t, index.CreateDocument(string(rune('a'+i)), d, false))
++		}
++		waitForDocs(t, index, len(docs))
++
++		// documents must land on more than one shard reader for this test
++		// to actually exercise shard merging
++		readers, err := index.GetReaders(0, 0)
++		assert.NoError(t, err)
++		assert.Greater(t, len(readers), 1, "expected documents on multiple shard readers")
++		for _, r := range readers {
++			r.Close()
++		}
++	})
++
++	newQuery := func(q string, operator string, msm interface{}) *meta.ZincQuery {
++		return &meta.ZincQuery{
++			Size: 10,
++			Query: map[string]interface{}{
++				"combined_fields": map[string]interface{}{
++					"query":   q,
++					"fields":  []interface{}{"title", "summary", "tags"},
++					"operator": operator,
++					"minimum_should_match": msm,
++				},
++			},
++		}
++	}
++
++	hitIDs := func(resp *meta.SearchResponse) map[string]struct{} {
++		ids := make(map[string]struct{})
++		for _, h := range resp.Hits.Hits {
++			ids[h.ID] = struct{}{}
++		}
++		return ids
++	}
++
++	t.Run("OR matches a term in any field", func(t *testing.T) {
++		resp, err := index.Search(newQuery("brown", "", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, map[string]struct{}{"a": {}, "c": {}}, hitIDs(resp))
++	})
++
++	t.Run("AND combines terms across different fields", func(t *testing.T) {
++		// "brown" is only in title, "nature" only in tags; a per-field AND
++		// would fail, combined_fields must hit on both documents
++		resp, err := index.Search(newQuery("brown nature", "AND", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, map[string]struct{}{"a": {}, "c": {}}, hitIDs(resp))
++
++		resp, err = index.Search(newQuery("fox fiction", "AND", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, map[string]struct{}{"d": {}}, hitIDs(resp))
++	})
++
++	t.Run("AND misses when a term is absent", func(t *testing.T) {
++		resp, err := index.Search(newQuery("fox elephant", "AND", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, 0, resp.Hits.Total.Value)
++	})
++
++	t.Run("minimum_should_match is deterministic over terms", func(t *testing.T) {
++		resp, err := index.Search(newQuery("quick brown fox", "", 2.0))
++		assert.NoError(t, err)
++		assert.Equal(t, map[string]struct{}{"a": {}}, hitIDs(resp))
++
++		resp, err = index.Search(newQuery("quick brown fox", "", "67%"))
++		assert.NoError(t, err)
++		assert.Equal(t, map[string]struct{}{"a": {}}, hitIDs(resp))
++	})
++
++	t.Run("repeated searches return the same hit set and ranking", func(t *testing.T) {
++		first, err := index.Search(newQuery("brown animals forest", "", nil))
++		assert.NoError(t, err)
++		second, err := index.Search(newQuery("brown animals forest", "", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, hitIDs(first), hitIDs(second))
++		assert.Equal(t, len(first.Hits.Hits), len(second.Hits.Hits))
++		for i := range first.Hits.Hits {
++			assert.Equal(t, first.Hits.Hits[i].ID, second.Hits.Hits[i].ID)
++			assert.Equal(t, first.Hits.Hits[i].Score, second.Hits.Hits[i].Score)
++		}
++	})
++
++	t.Run("illegal operator and minimum_should_match reject only this request", func(t *testing.T) {
++		_, err := index.Search(newQuery("brown", "xor", nil))
++		assert.ErrorContains(t, err, "illegal operator")
++
++		_, err = index.Search(newQuery("brown", "", "bad"))
++		assert.ErrorContains(t, err, "minimum_should_match")
++
++		// a following valid query still works
++		resp, err := index.Search(newQuery("brown", "", nil))
++		assert.NoError(t, err)
++		assert.Equal(t, 2, resp.Hits.Total.Value)
++	})
++
++	t.Run("cleanup", func(t *testing.T) {
++		assert.NoError(t, DeleteIndex(indexName))
++	})
++}
+diff --git a/pkg/core/multi_search.go b/pkg/core/multi_search.go
+index a5c4cd0..5b42da9 100644
+--- a/pkg/core/multi_search.go
++++ b/pkg/core/multi_search.go
+@@ -23,7 +23,6 @@ import (
+ 
+ 	"github.com/rs/zerolog/log"
+ 	"github.com/vcaesar/riot"
+-	"github.com/vcaesar/riot/analysis"
+ 
+ 	zincsearch "github.com/zincsearch/zincsearch/pkg/bluge/search"
+ 	"github.com/zincsearch/zincsearch/pkg/meta"
+@@ -32,12 +31,14 @@ import (
+ )
+ 
+ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchResponse, error) {
+-	var mappings *meta.Mappings
+-	var analyzers map[string]*analysis.Analyzer
+-	var readers []*riot.Reader
+-	var shardNum int64
+-
+ 	timeMin, timeMax := timerange.Query(query.Query)
++
++	// resolve the target indexes first, validating the query against every
++	// index's own mappings before any reader is opened. Queries like
++	// combined_fields require compatible text fields/analyzers, so an
++	// incompatible index rejects the whole request instead of contaminating
++	// the merged result.
++	matchedIndexes := make([]*Index, 0)
+ 	isMatched := false
+ 	hasIndex := false
+ 	for _, index := range ZINC_INDEX_LIST.List() {
+@@ -54,23 +55,48 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
+ 			}
+ 		}
+ 
++		if _, err := uquery.ParseQueryDSL(query, index.GetMappings(), index.GetAnalyzers()); err != nil {
++			return nil, err
++		}
++		matchedIndexes = append(matchedIndexes, index)
++	}
++
++	if len(matchedIndexes) == 0 {
++		if !hasIndex {
++			return nil, fmt.Errorf("core.MultiSearchV2: error accessing reader: no index found")
++		}
++		return &meta.SearchResponse{}, nil
++	}
++
++	// open readers grouped by index: each group keeps the mappings/analyzers of
++	// its index, so the query is rebuilt per index on top of identical shard
++	// mappings instead of one mappings object for unrelated readers
++	groups := make([]*zincsearch.ReaderGroup, 0, len(matchedIndexes))
++	readers := make([]*riot.Reader, 0)
++	var shardNum int64
++	var mappings *meta.Mappings
++	for _, index := range matchedIndexes {
+ 		reader, err := index.GetReaders(timeMin, timeMax)
+ 		if err != nil {
++			for _, r := range readers {
++				r.Close()
++			}
+ 			return nil, err
+ 		}
+ 		readers = append(readers, reader...)
+ 		shardNum += index.GetShardNum()
+ 		if mappings == nil {
++			// first index mappings are only used to format the shared response
+ 			mappings = index.GetMappings()
+-			analyzers = index.GetAnalyzers()
+ 		}
+-
++		groups = append(groups, &zincsearch.ReaderGroup{
++			Readers:   reader,
++			Mappings:  index.GetMappings(),
++			Analyzers: index.GetAnalyzers(),
++		})
+ 	}
+ 
+ 	if len(readers) == 0 {
+-		if !hasIndex {
+-			return nil, fmt.Errorf("core.MultiSearchV2: error accessing reader: no index found")
+-		}
+ 		return &meta.SearchResponse{}, nil
+ 	}
+ 
+@@ -80,11 +106,6 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
+ 		}
+ 	}()
+ 
+-	_, err := uquery.ParseQueryDSL(query, mappings, analyzers)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+ 	ctx := context.Background()
+ 	var cancel context.CancelFunc
+ 	if query.Timeout > 0 {
+@@ -93,7 +114,7 @@ func MultiSearch(indexNames []string, query *meta.ZincQuery) (*meta.SearchRespon
+ 	}
+ 
+ 	// dmi, err := riot.MultiSearch(ctx, searchRequest, readers...)
+-	dmi, err := zincsearch.MultiSearch(ctx, query, mappings, analyzers, readers...)
++	dmi, err := zincsearch.MultiSearchGroups(ctx, query, groups...)
+ 	if err != nil {
+ 		log.Printf("core.MultiSearchV2: error executing search: %s", err.Error())
+ 		if err == context.DeadlineExceeded {
+diff --git a/pkg/meta/query_dsl.go b/pkg/meta/query_dsl.go
+index 41d0ee5..96c28c6 100644
+--- a/pkg/meta/query_dsl.go
++++ b/pkg/meta/query_dsl.go
+@@ -56,7 +56,7 @@ type Query struct {
+ 	MultiMatch        *MultiMatchQuery                   `json:"multi_match,omitempty"`         // .
+ 	MatchAll          *MatchAllQuery                     `json:"match_all,omitempty"`           // just set or null
+ 	MatchNone         *MatchNoneQuery                    `json:"match_none,omitempty"`          // just set or null
+-	CombinedFields    *CombinedFieldsQuery               `json:"combined_fields,omitempty"`     // TODO: not implemented
++	CombinedFields    *CombinedFieldsQuery               `json:"combined_fields,omitempty"`     // .
+ 	QueryString       *QueryStringQuery                  `json:"query_string,omitempty"`        // .
+ 	SimpleQueryString *SimpleQueryStringQuery            `json:"simple_query_string,omitempty"` // .
+ 	Exists            *ExistsQuery                       `json:"exists,omitempty"`              // .
+@@ -161,11 +161,12 @@ type MultiMatchQuery struct {
+ }
+ 
+ type CombinedFieldsQuery struct {
+-	Query              string   `json:"query,omitempty"`
+-	Analyzer           string   `json:"analyzer,omitempty"`
+-	Fields             []string `json:"fields,omitempty"`
+-	Operator           string   `json:"operator,omitempty"` // or(default), and
+-	MinimumShouldMatch float64  `json:"minimum_should_match,omitempty"`
++	Query              string      `json:"query,omitempty"`
++	Analyzer           string      `json:"analyzer,omitempty"`
++	Fields             []string    `json:"fields,omitempty"`
++	Operator           string      `json:"operator,omitempty"` // or(default), and
++	MinimumShouldMatch interface{} `json:"minimum_should_match,omitempty"`
++	Boost              float64     `json:"boost,omitempty"`
+ }
+ 
+ type QueryStringQuery struct {
+diff --git a/pkg/uquery/query/combined_fields.go b/pkg/uquery/query/combined_fields.go
+index 9d667de..736fbdb 100644
+--- a/pkg/uquery/query/combined_fields.go
++++ b/pkg/uquery/query/combined_fields.go
+@@ -16,10 +16,283 @@
+ package query
+ 
+ import (
++	"fmt"
++	"sort"
++	"strconv"
++	"strings"
++
+ 	"github.com/vcaesar/riot"
++	"github.com/vcaesar/riot/analysis"
++
+ 	"github.com/zincsearch/zincsearch/pkg/errors"
++	"github.com/zincsearch/zincsearch/pkg/meta"
++	zincanalysis "github.com/zincsearch/zincsearch/pkg/uquery/analysis"
++	zincanalyzer "github.com/zincsearch/zincsearch/pkg/uquery/analysis/analyzer"
++	"github.com/zincsearch/zincsearch/pkg/zutils"
+ )
+ 
+-func CombinedFieldsQuery(query map[string]interface{}) (riot.Query, error) {
+-	return nil, errors.New(errors.ErrorTypeNotImplemented, "[combined_fields] query doesn't support")
++// CombinedFieldsQuery builds a combined_fields query: the query text is analyzed
++// once with one search analyzer and every term may match in ANY of the mapped
++// text fields, as if the field contents were indexed into a single field.
++//
++// Field compatibility is validated against the passed mappings (which belong to
++// one index): mapped fields must be of type text and, unless an analyzer is
++// forced explicitly, they must share one search analyzer. Fields that do not
++// exist in the mappings are ignored, so an index without any of the requested
++// fields deterministically becomes a match_none query instead of producing
++// indeterminate results when readers are merged.
++func CombinedFieldsQuery(query map[string]interface{}, mappings *meta.Mappings, analyzers map[string]*analysis.Analyzer) (riot.Query, error) {
++	value := new(meta.CombinedFieldsQuery)
++	value.Boost = -1.0
++
++	hasQuery := false
++	hasFields := false
++	var minimumShouldMatch interface{}
++	zeroTermsQuery := "none"
++
++	for k, v := range query {
++		k := strings.ToLower(k)
++		switch k {
++		case "query":
++			s, ok := v.(string)
++			if !ok {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] query must be a string")
++			}
++			value.Query = s
++			hasQuery = true
++		case "fields":
++			vv, ok := v.([]interface{})
++			if !ok {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] fields must be an array of strings")
++			}
++			for _, vvv := range vv {
++				s, ok := vvv.(string)
++				if !ok {
++					return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] fields must be an array of strings")
++				}
++				value.Fields = append(value.Fields, s)
++			}
++			hasFields = true
++		case "analyzer":
++			s, ok := v.(string)
++			if !ok {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] analyzer must be a string")
++			}
++			value.Analyzer = s
++		case "operator":
++			s, ok := v.(string)
++			if !ok {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] operator must be a string")
++			}
++			value.Operator = s
++		case "minimum_should_match":
++			minimumShouldMatch = v
++		case "boost":
++			f, err := zutils.ToFloat64(v)
++			if err != nil {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] boost must be a number")
++			}
++			value.Boost = f
++		case "zero_terms_query":
++			s, ok := v.(string)
++			if !ok {
++				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] zero_terms_query must be a string")
++			}
++			s = strings.ToLower(strings.TrimSpace(s))
++			if s != "none" && s != "all" {
++				return nil, errors.New(errors.ErrorTypeIllegalArgumentException,
++					fmt.Sprintf("[combined_fields] illegal zero_terms_query value [%s], expected [none] or [all]", s))
++			}
++			zeroTermsQuery = s
++		case "_name", "name":
++			// accepted but not enforced, compatible with ES query naming
++		default:
++			// unknown options are ignored, same convention as match/multi_match
++		}
++	}
++
++	if !hasQuery {
++		return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] requires field [query]")
++	}
++	if !hasFields || len(value.Fields) == 0 {
++		return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] requires field [fields] with at least one entry")
++	}
++
++	// only OR/AND are legal operators, reject anything else up front
++	operator := riot.MatchQueryOperatorOr
++	if value.Operator != "" {
++		switch strings.ToUpper(strings.TrimSpace(value.Operator)) {
++		case "OR":
++			operator = riot.MatchQueryOperatorOr
++		case "AND":
++			operator = riot.MatchQueryOperatorAnd
++		default:
++			return nil, errors.New(errors.ErrorTypeIllegalArgumentException,
++				fmt.Sprintf("[combined_fields] illegal operator value [%s], expected [OR] or [AND]", value.Operator))
++		}
++	}
++
++	// parse field entries, supporting the "field^boost" notation; the field
++	// order is preserved so the built query is stable across shards/indexes.
++	fieldOrder := make([]string, 0, len(value.Fields))
++	fieldBoosts := make(map[string]float64)
++	for _, field := range value.Fields {
++		name := field
++		boost := 1.0
++		if idx := strings.LastIndex(field, "^"); idx >= 0 {
++			name = field[:idx]
++			b, err := strconv.ParseFloat(field[idx+1:], 64)
++			if err != nil || b <= 0 {
++				return nil, errors.New(errors.ErrorTypeXContentParseException,
++					fmt.Sprintf("[combined_fields] illegal field boost [%s]", field))
++			}
++			boost = b
++		}
++		if strings.TrimSpace(name) == "" {
++			return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] field name must not be empty")
++		}
++		if prev, ok := fieldBoosts[name]; ok {
++			if prev != boost {
++				return nil, errors.New(errors.ErrorTypeIllegalArgumentException,
++					fmt.Sprintf("[combined_fields] field [%s] is listed more than once with different boosts", name))
++			}
++			continue
++		}
++		fieldBoosts[name] = boost
++		fieldOrder = append(fieldOrder, name)
++	}
++
++	// mapping validation: mapped fields have to be text fields; fields that
++	// this index does not map are skipped rather than matching nothing useful.
++	participating := make([]string, 0, len(fieldOrder))
++	for _, field := range fieldOrder {
++		prop, ok := meta.Property{}, false
++		if mappings != nil {
++			prop, ok = mappings.GetProperty(field)
++		}
++		if !ok {
++			continue
++		}
++		if prop.Type != "text" {
++			return nil, errors.New(errors.ErrorTypeIllegalArgumentException,
++				fmt.Sprintf("[combined_fields] field [%s] is of type [%s], but only text fields are supported", field, prop.Type))
++		}
++		participating = append(participating, field)
++	}
++
++	// none of the requested fields exists in this index: stable empty result
++	if len(participating) == 0 {
++		return riot.NewMatchNoneQuery(), nil
++	}
++
++	// resolve the single analyzer shared by every participating field
++	var zer *analysis.Analyzer
++	if value.Analyzer != "" {
++		a, err := zincanalysis.QueryAnalyzer(analyzers, value.Analyzer)
++		if err != nil {
++			return nil, err
++		}
++		zer = a
++	} else {
++		analyzerNames := make(map[string]struct{})
++		for _, field := range participating {
++			prop, _ := mappings.GetProperty(field)
++			name := prop.SearchAnalyzer
++			if name == "" {
++				name = prop.Analyzer
++			}
++			analyzerNames[name] = struct{}{}
++		}
++		if len(analyzerNames) > 1 {
++			names := make([]string, 0, len(analyzerNames))
++			for name := range analyzerNames {
++				names = append(names, name)
++			}
++			sort.Strings(names)
++			return nil, errors.New(errors.ErrorTypeIllegalArgumentException,
++				fmt.Sprintf("[combined_fields] fields must all have the same search analyzer, but found [%s]", strings.Join(names, ", ")))
++		}
++		var commonName string
++		for name := range analyzerNames {
++			commonName = name
++		}
++		if commonName != "" {
++			a, err := zincanalysis.QueryAnalyzer(analyzers, commonName)
++			if err != nil {
++				return nil, err
++			}
++			zer = a
++		}
++	}
++
++	// analyze the query text exactly once with the common analyzer; a nil
++	// analyzer falls back to the standard analyzer, which is also the index
++	// time default for text fields without a configured analyzer.
++	ana := zer
++	if ana == nil {
++		ana, _ = zincanalyzer.NewStandardAnalyzer(nil)
++	}
++	tokenStream := ana.Analyze([]byte(value.Query))
++
++	// dedupe terms but keep first-seen order so scoring/minimum math is stable
++	terms := make([]string, 0, len(tokenStream))
++	seen := make(map[string]struct{}, len(tokenStream))
++	for _, token := range tokenStream {
++		term := string(token.Term)
++		if _, ok := seen[term]; ok {
++			continue
++		}
++		seen[term] = struct{}{}
++		terms = append(terms, term)
++	}
++
++	if len(terms) == 0 {
++		if zeroTermsQuery == "all" {
++			subq := riot.NewMatchAllQuery()
++			if value.Boost >= 0 {
++				subq.SetBoost(value.Boost)
++			}
++			return subq, nil
++		}
++		return riot.NewMatchNoneQuery(), nil
++	}
++
++	// per-term clause: the term matches when it occurs in ANY participating field
++	termQueries := make([]riot.Query, 0, len(terms))
++	for _, term := range terms {
++		termQuery := riot.NewBooleanQuery()
++		for _, field := range participating {
++			tq := riot.NewTermQuery(term)
++			tq.SetField(field)
++			tq.SetBoost(fieldBoosts[field])
++			termQuery.AddShould(tq)
++		}
++		termQuery.SetMinShould(1)
++		termQueries = append(termQueries, termQuery)
++	}
++
++	// combine terms with one deterministic boolean semantics over ALL fields
++	subq := riot.NewBooleanQuery()
++	switch operator {
++	case riot.MatchQueryOperatorAnd:
++		// every term must occur in at least one of the participating fields
++		subq.AddMust(termQueries...)
++	default:
++		minShould := 1
++		if minimumShouldMatch != nil {
++			m, err := zutils.CalculateMin(len(terms), minimumShouldMatch)
++			if err != nil {
++				return nil, errors.New(errors.ErrorTypeXContentParseException,
++					fmt.Sprintf("[combined_fields] unsupported minimum_should_match value: %v", err))
++			}
++			minShould = m
++		}
++		subq.AddShould(termQueries...)
++		subq.SetMinShould(minShould)
++	}
++	if value.Boost >= 0 {
++		subq.SetBoost(value.Boost)
++	}
++
++	return subq, nil
+ }
+diff --git a/pkg/uquery/query/combined_fields_test.go b/pkg/uquery/query/combined_fields_test.go
+new file mode 100644
+index 0000000..0512719
+--- /dev/null
++++ b/pkg/uquery/query/combined_fields_test.go
+@@ -0,0 +1,292 @@
++/* Copyright 2022 Zinc Labs Inc. and Contributors
++*
++* Licensed under the Apache License, Version 2.0 (the "License");
++* you may not use this file except in compliance with the License.
++* You may obtain a copy of the License at
++*
++*     http://www.apache.org/licenses/LICENSE-2.0
++*
++* Unless required by applicable law or agreed to in writing, software
++* distributed under the License is distributed on an "AS IS" BASIS,
++* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++* See the License for the specific language governing permissions and
++* limitations under the License.
++ */
++
++package query
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/vcaesar/riot"
++
++	"github.com/zincsearch/zincsearch/pkg/meta"
++)
++
++func combinedFieldsMappings() *meta.Mappings {
++	m := meta.NewMappings()
++	m.SetProperty("f1", meta.NewProperty("text"))
++	m.SetProperty("f2", meta.NewProperty("text"))
++	std := meta.NewProperty("text")
++	std.Analyzer = "standard"
++	m.SetProperty("f_std", std)
++	m.SetProperty("f_kw", meta.NewProperty("keyword"))
++	m.SetProperty("f_num", meta.NewProperty("numeric"))
++	return m
++}
++
++// assertTermClauses checks that a per-term clause is a should boolean query
++// with one term query per participating field.
++func assertTermClauses(t *testing.T, clause riot.Query, fields map[string]float64, term string) {
++	bq := clause.(*riot.BooleanQuery)
++	assert.Equal(t, 1, bq.MinShould())
++	assert.Len(t, bq.Shoulds(), len(fields))
++	for _, sub := range bq.Shoulds() {
++		tq := sub.(*riot.TermQuery)
++		assert.Equal(t, term, tq.Term())
++		assert.Equal(t, fields[tq.Field()], tq.Boost())
++	}
++}
++
++func TestCombinedFieldsQuery(t *testing.T) {
++	mappings := combinedFieldsMappings()
++
++	t.Run("default OR combines terms across all fields", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello world", "fields": []interface{}{"f1", "f2"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		bq := q.(*riot.BooleanQuery)
++		assert.Len(t, bq.Shoulds(), 2)
++		assert.Equal(t, 1, bq.MinShould())
++		assert.Equal(t, 1.0, bq.Boost())
++		assertTermClauses(t, bq.Shoulds()[0], map[string]float64{"f1": 1, "f2": 1}, "hello")
++		assertTermClauses(t, bq.Shoulds()[1], map[string]float64{"f1": 1, "f2": 1}, "world")
++		assert.Empty(t, bq.Musts())
++	})
++
++	t.Run("AND requires every term in at least one field", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello world", "fields": []interface{}{"f1", "f2"}, "operator": "and",
++		}, mappings, nil)
++		assert.NoError(t, err)
++		bq := q.(*riot.BooleanQuery)
++		assert.Len(t, bq.Musts(), 2)
++		assert.Empty(t, bq.Shoulds())
++		assertTermClauses(t, bq.Musts()[0], map[string]float64{"f1": 1, "f2": 1}, "hello")
++		assertTermClauses(t, bq.Musts()[1], map[string]float64{"f1": 1, "f2": 1}, "world")
++	})
++
++	t.Run("minimum_should_match as number", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "a b c", "fields": []interface{}{"f1"}, "minimum_should_match": 2.0,
++		}, mappings, nil)
++		assert.NoError(t, err)
++		bq := q.(*riot.BooleanQuery)
++		assert.Len(t, bq.Shoulds(), 3)
++		assert.Equal(t, 2, bq.MinShould())
++	})
++
++	t.Run("minimum_should_match percentage", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "a b c d", "fields": []interface{}{"f1"}, "minimum_should_match": "75%",
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assert.Equal(t, 3, q.(*riot.BooleanQuery).MinShould())
++	})
++
++	t.Run("minimum_should_match invalid", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "a b", "fields": []interface{}{"f1"}, "minimum_should_match": "bad",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "minimum_should_match")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "a b", "fields": []interface{}{"f1"}, "minimum_should_match": true,
++		}, mappings, nil)
++		assert.Error(t, err)
++	})
++
++	t.Run("minimum_should_match ignored with AND", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "a b", "fields": []interface{}{"f1"}, "minimum_should_match": 2.0, "operator": "AND",
++		}, mappings, nil)
++		assert.NoError(t, err)
++		bq := q.(*riot.BooleanQuery)
++		assert.Len(t, bq.Musts(), 2)
++	})
++
++	t.Run("field boost notation", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1^3", "f2^1.5"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assertTermClauses(t, q.(*riot.BooleanQuery).Shoulds()[0],
++			map[string]float64{"f1": 3, "f2": 1.5}, "hello")
++	})
++
++	t.Run("illegal field boost", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1^x"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "illegal field boost")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1^0"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "illegal field boost")
++	})
++
++	t.Run("duplicate fields", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1", "f1^1"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assertTermClauses(t, q.(*riot.BooleanQuery).Shoulds()[0],
++			map[string]float64{"f1": 1}, "hello")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1", "f1^2"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "different boosts")
++	})
++
++	t.Run("missing fields are ignored", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1", "unknown"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assertTermClauses(t, q.(*riot.BooleanQuery).Shoulds()[0],
++			map[string]float64{"f1": 1}, "hello")
++	})
++
++	t.Run("all fields missing is match_none", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"a", "b"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assert.IsType(t, &riot.MatchNoneQuery{}, q)
++	})
++
++	t.Run("non-text mapped fields are rejected", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f_kw"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "only text fields are supported")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f_num"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "only text fields are supported")
++	})
++
++	t.Run("fields must share one search analyzer", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1", "f_std"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "same search analyzer")
++	})
++
++	t.Run("explicit analyzer forces compatibility", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1", "f_std"}, "analyzer": "standard",
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assertTermClauses(t, q.(*riot.BooleanQuery).Shoulds()[0],
++			map[string]float64{"f1": 1, "f_std": 1}, "hello")
++	})
++
++	t.Run("unknown analyzer is rejected", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1"}, "analyzer": "nope",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "unknown analyzer")
++	})
++
++	t.Run("zero terms", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "", "fields": []interface{}{"f1"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assert.IsType(t, &riot.MatchNoneQuery{}, q)
++
++		q, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "", "fields": []interface{}{"f1"}, "zero_terms_query": "all",
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assert.IsType(t, &riot.MatchAllQuery{}, q)
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "", "fields": []interface{}{"f1"}, "zero_terms_query": "maybe",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "zero_terms_query")
++	})
++
++	t.Run("terms are normalized and deduped", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "Hello HELLO hello", "fields": []interface{}{"f1"},
++		}, mappings, nil)
++		assert.NoError(t, err)
++		bq := q.(*riot.BooleanQuery)
++		assert.Len(t, bq.Shoulds(), 1)
++		assertTermClauses(t, bq.Shoulds()[0], map[string]float64{"f1": 1}, "hello")
++	})
++
++	t.Run("top level boost", func(t *testing.T) {
++		q, err := CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"f1"}, "boost": 2.5,
++		}, mappings, nil)
++		assert.NoError(t, err)
++		assert.Equal(t, 2.5, q.(*riot.BooleanQuery).Boost())
++	})
++
++	t.Run("malformed requests are rejected", func(t *testing.T) {
++		_, err := CombinedFieldsQuery(map[string]interface{}{
++			"fields": []interface{}{"f1"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "requires field [query]")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "requires field [fields]")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "requires field [fields]")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": 1, "fields": []interface{}{"f1"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "query must be a string")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": "f1",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "fields must be an array")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{1},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "fields must be an array of strings")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "hello", "fields": []interface{}{"^2"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "field name must not be empty")
++
++		_, err = CombinedFieldsQuery(map[string]interface{}{
++			"query": "x", "fields": []interface{}{"f1"}, "operator": "xor",
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "illegal operator")
++	})
++
++	t.Run("dispatch wraps parse errors", func(t *testing.T) {
++		_, err := Query(map[string]interface{}{
++			"combined_fields": map[string]interface{}{"query": "x", "fields": []interface{}{"f1"}, "operator": "xor"},
++		}, mappings, nil)
++		assert.ErrorContains(t, err, "[combined_fields] failed to parse field")
++	})
++}
+diff --git a/pkg/uquery/query/query.go b/pkg/uquery/query/query.go
+index 75aa8ef..00960c7 100644
+--- a/pkg/uquery/query/query.go
++++ b/pkg/uquery/query/query.go
+@@ -99,7 +99,7 @@ func Query(query interface{}, mappings *meta.Mappings, analyzers map[string]*ana
+ 				return nil, errors.New(errors.ErrorTypeXContentParseException, "[match_none] failed to parse field").Cause(err)
+ 			}
+ 		case "combined_fields":
+-			if subq, err = CombinedFieldsQuery(v); err != nil {
++			if subq, err = CombinedFieldsQuery(v, mappings, analyzers); err != nil {
+ 				return nil, errors.New(errors.ErrorTypeXContentParseException, "[combined_fields] failed to parse field").Cause(err)
+ 			}
+ 		case "query_string":
+diff --git a/pkg/uquery/query/query_test.go b/pkg/uquery/query/query_test.go
+index b10e02c..d54048a 100644
+--- a/pkg/uquery/query/query_test.go
++++ b/pkg/uquery/query/query_test.go
+@@ -213,9 +213,8 @@ func TestParseFuzziness(t *testing.T) {
+ 
+ func TestNotImplementedQueries(t *testing.T) {
+ 	tests := map[string]func(map[string]interface{}) (riot.Query, error){
+-		"boosting":         BoostingQuery,
+-		"combined_fields":  CombinedFieldsQuery,
+-		"exists":           ExistsQuery,
++		"boosting":        BoostingQuery,
++		"exists":          ExistsQuery,
+ 		"terms_set":        TermsSetQuery,
+ 		"geo_bounding_box": GeoBoundingBoxQuery,
+ 		"geo_distance":     GeoDistanceQuery,
